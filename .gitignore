@@ -1,0 +1,77 @@
+# ============================================================
+# HumanUP — .gitignore
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- Training artifacts (local, large — never commit) ---
+unitree_rl_mjlab/logs/
+unitree_rl_mjlab/wandb/
+unitree_rl_mjlab/keyframe_check/
+unitree_rl_mjlab/screenshot.png
+
+# Model checkpoints and exported policies
+*.pt
+*.onnx
+*.onnx.data
+
+# TensorBoard event logs
+events.out.tfevents.*
+
+# --- Prebuilt third-party binaries (large, not source) ---
+# MuJoCo standalone simulate binary + shared lib (download from mujoco.org)
+unitree_rl_mjlab/simulate/mujoco/bin/
+unitree_rl_mjlab/simulate/mujoco/lib/
+# MuJoCo demo models (not needed for training)
+unitree_rl_mjlab/simulate/mujoco/model/
+# ONNX Runtime prebuilt libs (downloaded, not repo content)
+unitree_rl_mjlab/deploy/thirdparty/
+
+# --- Non-G1 robot assets (upstream Unitree meshes, 190MB total) ---
+# Keep only unitree_g1. Re-clone unitree_rl_mjlab upstream if you need these.
+unitree_rl_mjlab/src/assets/robots/unitree_as2/
+unitree_rl_mjlab/src/assets/robots/unitree_h1_2/
+unitree_rl_mjlab/src/assets/robots/unitree_go2/
+unitree_rl_mjlab/src/assets/robots/unitree_r1/
+unitree_rl_mjlab/src/assets/robots/unitree_a2/
+unitree_rl_mjlab/src/assets/robots/unitree_h2/
+
+# --- HoST repo (separate upstream, to be added as submodule later) ---
+HoST/
+
+# --- Unitree Dexterous Hands (upstream asset download) ---
+Unitree_Dexterous_hands/
+
+# --- Claude Code internal (personal session state, not project code) ---
+.claude/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Conda / virtualenv ---
+*.conda
+.env
+.venv
+env/
+venv/
+
+# --- Debug / temp ---
+*.log
+*.tmp
+*.bak
+/tmp/

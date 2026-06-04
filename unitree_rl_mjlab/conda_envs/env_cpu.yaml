@@ -1,0 +1,40 @@
+name: unitree_rl_cpu
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+
+  # System libraries required by mjlab (from setup_en.md)
+  - yaml-cpp         # libyaml-cpp-dev
+  - boost            # libboost-all-dev
+  - eigen            # libeigen3-dev
+
+  - pip:
+    # CPU-only PyTorch wheel (no CUDA download — ~250MB vs ~2GB)
+    - --extra-index-url https://download.pytorch.org/whl/cpu
+    - torch>=2.7.0
+    - torchvision>=0.22.0
+    - torchaudio>=2.7.0
+
+    # MuJoCo standard (CPU, works on AMD/iGPU)
+    - mujoco>=3.2.3
+
+    # mjlab framework + this package (cpu extra = no mujoco-warp)
+    - -e /home/aidapt/HumanUP/unitree_rl_mjlab[cpu]
+
+    # Utilities
+    - numpy>=1.24
+    - scipy
+    - tensorboard
+    - wandb
+    - tqdm
+    - tyro
+    - matplotlib
+    - pyyaml
+
+    # Offscreen rendering on AMD (osmesa backend)
+    - pyopengl

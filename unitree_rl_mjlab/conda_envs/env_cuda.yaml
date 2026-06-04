@@ -1,0 +1,42 @@
+name: unitree_rl_cuda
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+  # Adjust cuda-toolkit version to match your driver: nvidia-smi shows "CUDA Version: X.Y"
+  - cuda-toolkit=12.4
+
+  # System libraries required by mjlab
+  - yaml-cpp
+  - boost
+  - eigen
+
+  - pip:
+    # PyTorch with CUDA 12.4 (>=2.7.0 required by mjlab)
+    - --extra-index-url https://download.pytorch.org/whl/cu124
+    - torch>=2.7.0
+    - torchvision>=0.22.0
+    - torchaudio>=2.7.0
+
+    # MuJoCo GPU-accelerated physics (NVIDIA only)
+    - mujoco-warp==3.5.0
+
+    # mjlab framework + this package (cuda extras)
+    - -e /home/aidapt/HumanUP/unitree_rl_mjlab[cuda]
+
+    # Utilities
+    - numpy>=1.24
+    - scipy
+    - tensorboard
+    - wandb
+    - tqdm
+    - tyro
+    - matplotlib
+    - pyyaml
+
+    # Multi-GPU support
+    - torchrunx

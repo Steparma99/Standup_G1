@@ -1,0 +1,28 @@
+# ============================================================
+# Hardware Backend Configuration
+# ============================================================
+# Set `backend` to match the current machine:
+#   "cpu"  → AMD / iGPU / CPU-only (no CUDA required)
+#   "cuda" → NVIDIA GPU with CUDA support
+# ============================================================
+
+backend: "cpu"
+
+# --- Training defaults shared by local launchers ---
+train:
+  logger: "tensorboard"
+
+# --- CPU / AMD settings ---
+cpu:
+  num_envs: 64          # Fewer parallel envs on CPU
+  mujoco_gl: "osmesa"   # Safe headless/offscreen renderer on AMD/Mesa (verified).
+                        # For the interactive native viewer (play.py) use MUJOCO_GL=glfw.
+  torch_device: "cpu"
+  num_threads: 8        # Parallel simulation threads
+
+# --- NVIDIA CUDA settings ---
+cuda:
+  gpu_ids: [0]          # GPU indices (e.g. [0, 1] for multi-GPU)
+  num_envs: 4096        # Full parallel envs on GPU
+  mujoco_gl: "egl"      # NVIDIA EGL offscreen renderer
+  torch_device: "cuda"
