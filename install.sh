@@ -59,6 +59,10 @@ else
   conda env create -f "$ENV_YAML"
 fi
 
+# --- Install the mjlab package in editable mode (path-agnostic) ---
+echo "[INFO] Installing unitree_rl_mjlab[$BACKEND] in editable mode ..."
+conda run -n "$ENV_NAME" pip install -e "$MJLAB_DIR[$BACKEND]"
+
 echo ""
 echo "============================================================"
 echo "  Installation complete!"

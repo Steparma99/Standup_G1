@@ -23,8 +23,7 @@ dependencies:
     # MuJoCo standard (CPU, works on AMD/iGPU)
     - mujoco>=3.2.3
 
-    # mjlab framework + this package (cpu extra = no mujoco-warp)
-    - -e /home/aidapt/HumanUP/unitree_rl_mjlab[cpu]
+    # mjlab framework (install.sh runs: pip install -e <repo>/unitree_rl_mjlab[cpu])
 
     # Utilities
     - numpy>=1.24

@@ -25,8 +25,7 @@ dependencies:
     # MuJoCo GPU-accelerated physics (NVIDIA only)
     - mujoco-warp==3.5.0
 
-    # mjlab framework + this package (cuda extras)
-    - -e /home/aidapt/HumanUP/unitree_rl_mjlab[cuda]
+    # mjlab framework (install.sh runs: pip install -e <repo>/unitree_rl_mjlab[cuda])
 
     # Utilities
     - numpy>=1.24

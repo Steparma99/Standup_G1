@@ -1,0 +1,49 @@
+# ============================================================
+# Standup G1 — NVIDIA Server Requirements (CUDA backend)
+# ============================================================
+# Primary install method: bash install.sh (reads hardware_config.yaml)
+# This file is a reference / fallback for pip-only environments.
+#
+# Prerequisites (system-level, NOT pip):
+#   - NVIDIA driver >= 525
+#   - CUDA >= 12.4  (check: nvidia-smi | grep "CUDA Version")
+#   - Python 3.11   (check: python --version)
+#   - conda/mamba   (https://docs.conda.io/en/latest/miniconda.html)
+#
+# Recommended install:
+#   1. Edit hardware_config.yaml  →  backend: "cuda"
+#   2. bash install.sh
+#   3. conda activate unitree_rl_cuda
+# ============================================================
+
+# --- PyTorch (CUDA 12.4) ---
+# If your server has a different CUDA version, change "cu124" accordingly:
+#   CUDA 11.8 → cu118    CUDA 12.1 → cu121    CUDA 12.6 → cu126
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch>=2.7.0
+torchvision>=0.22.0
+torchaudio>=2.7.0
+
+# --- MuJoCo GPU-accelerated physics (NVIDIA only) ---
+mujoco-warp==3.5.0
+
+# --- RL framework (mjlab is a dependency of unitree_rl_mjlab) ---
+# After cloning, run: pip install -e unitree_rl_mjlab[cuda]
+# This installs mjlab==1.2.0 automatically.
+
+# --- Scientific stack ---
+numpy>=1.24
+scipy
+
+# --- Training monitoring ---
+tensorboard
+wandb
+
+# --- Utilities ---
+tqdm
+tyro
+matplotlib
+pyyaml
+
+# --- Multi-GPU training ---
+torchrunx
