@@ -79,11 +79,7 @@ case "$BACKEND" in
       EXTRA_ARGS+=("--env.scene.num-envs=$NUM_ENVS")
     fi
     if [[ "$*" != *"--gpu-ids"* ]]; then
-      EXTRA_ARGS+=("--gpu-ids")
-      IFS=',' read -ra GPU_ID_ARRAY <<< "$GPU_IDS_CLEAN"
-      for gpu_id in "${GPU_ID_ARRAY[@]}"; do
-        EXTRA_ARGS+=("$gpu_id")
-      done
+      EXTRA_ARGS+=("--gpu-ids" "[$GPU_IDS_CLEAN]")
     fi
     ;;
 
