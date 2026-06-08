@@ -1,52 +1,58 @@
-from .unitree_go2.go2_constants import (
-  get_go2_robot_cfg as get_go2_robot_cfg,
-)
+"""Robot asset exports.
 
-from .unitree_a2.a2_constants import (
-  get_a2_robot_cfg as get_a2_robot_cfg,
-)
+This repository only vendors a subset of the upstream robot definitions.
+Import optional robots lazily so task registration for G1 does not fail when
+unrelated robot packages are absent.
+"""
 
-from .unitree_as2.as2_constants import (
-  get_as2_robot_cfg as get_as2_robot_cfg,
-)
+from importlib import import_module
 
-from .unitree_g1.g1_constants import (
-  G1_ACTION_SCALE as G1_ACTION_SCALE,
-)
-from .unitree_g1.g1_constants import (
-  get_g1_robot_cfg as get_g1_robot_cfg,
-)
-from .unitree_g1.g1_constants import (
-  get_g1_supine_robot_cfg as get_g1_supine_robot_cfg,
-)
-from .unitree_g1.g1_constants import (
-  get_g1_prone_robot_cfg as get_g1_prone_robot_cfg,
-)
 
-from .unitree_g1.g1_23dof_constants import (
-  G1_23DOF_ACTION_SCALE as G1_23DOF_ACTION_SCALE,
-)
-from .unitree_g1.g1_23dof_constants import (
-  get_g1_23dof_robot_cfg as get_g1_23dof_robot_cfg,
-)
+def _export(module_name: str, names: list[str]) -> None:
+    try:
+        module = import_module(module_name, package=__name__)
+    except ModuleNotFoundError:
+        return
+    for name in names:
+        globals()[name] = getattr(module, name)
 
-from .unitree_r1.r1_constants import (
-  R1_ACTION_SCALE as R1_ACTION_SCALE,
-)
-from .unitree_r1.r1_constants import (
-  get_r1_robot_cfg as get_r1_robot_cfg,
-)
 
-from .unitree_h1_2.h1_2_constants import (
-  H1_2_ACTION_SCALE as H1_2_ACTION_SCALE,
-)
-from .unitree_h1_2.h1_2_constants import (
-  get_h1_2_robot_cfg as get_h1_2_robot_cfg,
-)
+_export(".unitree_g1.g1_constants", [
+    "G1_ACTION_SCALE",
+    "get_g1_robot_cfg",
+    "get_g1_supine_robot_cfg",
+    "get_g1_prone_robot_cfg",
+])
 
-from .unitree_h2.h2_constants import (
-  H2_ACTION_SCALE as H2_ACTION_SCALE,
-)
-from .unitree_h2.h2_constants import (
-  get_h2_robot_cfg as get_h2_robot_cfg,
-)
+_export(".unitree_g1.g1_23dof_constants", [
+    "G1_23DOF_ACTION_SCALE",
+    "get_g1_23dof_robot_cfg",
+])
+
+_export(".unitree_go2.go2_constants", [
+    "get_go2_robot_cfg",
+])
+
+_export(".unitree_a2.a2_constants", [
+    "get_a2_robot_cfg",
+])
+
+_export(".unitree_as2.as2_constants", [
+    "get_as2_robot_cfg",
+])
+
+_export(".unitree_r1.r1_constants", [
+    "R1_ACTION_SCALE",
+    "get_r1_robot_cfg",
+])
+
+_export(".unitree_h1_2.h1_2_constants", [
+    "H1_2_ACTION_SCALE",
+    "get_h1_2_robot_cfg",
+])
+
+_export(".unitree_h2.h2_constants", [
+    "H2_ACTION_SCALE",
+    "get_h2_robot_cfg",
+])
+
