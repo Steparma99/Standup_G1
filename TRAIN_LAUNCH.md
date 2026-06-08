@@ -17,13 +17,13 @@
   Se vuoi lanciare senza wrapper, diretto:
   CPU / AMD:
 
-  cd /home/aidapt/HumanUP/unitree_rl_mjlab
+  cd /home/aidapt/TEST_STAND/Standup_G1/unitree_rl_mjlab
   HOME=/tmp MPLCONFIGDIR=/tmp XDG_CACHE_HOME=/tmp WARP_CACHE_DIR=/tmp/warp conda run -n unitree_rl_cpu python scripts/
   train.py Unitree-G1-GetUp --gpu-ids None --agent.max-iterations=100 --env.scene.num-envs=64
 
   GPU NVIDIA:
 
-  cd /home/aidapt/HumanUP/unitree_rl_mjlab
+  cd /home/aidapt/TEST_STAND/Standup_G1/unitree_rl_mjlab
   conda run -n unitree_rl_cuda python scripts/train.py Unitree-G1-GetUp --gpu-ids 0 --agent.max-iterations=100
   --env.scene.num-envs=4096
 
@@ -61,7 +61,7 @@ Log e pesi
 
   Lancio:
 
-  cd /home/aidapt/HumanUP/unitree_rl_mjlab
+  cd /home/aidapt/TEST_STAND/Standup_G1/unitree_rl_mjlab
   conda run -n unitree_rl_cpu tensorboard --logdir logs/rsl_rl/g1_getup --port 6006
 
   Poi apri nel browser:

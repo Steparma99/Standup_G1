@@ -16,6 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/hardware_config.yaml"
 MJLAB_DIR="$SCRIPT_DIR/unitree_rl_mjlab"
+EXTRA_ARGS=()
 
 if [ $# -lt 1 ]; then
   echo "Usage: bash train.sh <task> [extra args]"
@@ -31,13 +32,19 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # --- Parse hardware_config.yaml ---
+_yaml_top_level_get() {
+  local key="$1"
+  grep -E "^[[:space:]]*$key[[:space:]]*:" "$CONFIG_FILE" | head -1 \
+    | sed 's/.*:\s*["\x27]\?\([^"#\x27]*\)["\x27]\?.*/\1/' | xargs
+}
+
 _yaml_get() {
   # Usage: _yaml_get <section> <key>
   grep -A 20 "^$1:" "$CONFIG_FILE" | grep -E "^\s+$2\s*:" | head -1 \
     | sed 's/.*:\s*["\x27]\?\([^"#\x27]*\)["\x27]\?.*/\1/' | xargs
 }
 
-BACKEND=$(_yaml_get "" "backend")
+BACKEND=$(_yaml_top_level_get "backend")
 echo "[INFO] Backend: $BACKEND"
 
 case "$BACKEND" in
@@ -52,10 +59,9 @@ case "$BACKEND" in
 
     # Inject num_envs if not already provided by the caller
     if [[ "$*" != *"--env.scene.num-envs"* ]]; then
-      EXTRA_ARGS="--env.scene.num-envs=$NUM_ENVS"
-    else
-      EXTRA_ARGS=""
+      EXTRA_ARGS+=("--env.scene.num-envs=$NUM_ENVS")
     fi
+    EXTRA_ARGS+=("--gpu-ids" "None")
     ;;
 
   cuda)
@@ -70,9 +76,14 @@ case "$BACKEND" in
     echo "[INFO] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES  |  MUJOCO_GL=$MUJOCO_GL  |  num_envs=$NUM_ENVS"
 
     if [[ "$*" != *"--env.scene.num-envs"* ]]; then
-      EXTRA_ARGS="--env.scene.num-envs=$NUM_ENVS"
-    else
-      EXTRA_ARGS=""
+      EXTRA_ARGS+=("--env.scene.num-envs=$NUM_ENVS")
+    fi
+    if [[ "$*" != *"--gpu-ids"* ]]; then
+      EXTRA_ARGS+=("--gpu-ids")
+      IFS=',' read -ra GPU_ID_ARRAY <<< "$GPU_IDS_CLEAN"
+      for gpu_id in "${GPU_ID_ARRAY[@]}"; do
+        EXTRA_ARGS+=("$gpu_id")
+      done
     fi
     ;;
 
@@ -84,6 +95,6 @@ esac
 
 # --- Launch training ---
 cd "$MJLAB_DIR"
-echo "[INFO] Launching: python scripts/train.py $* $EXTRA_ARGS"
+echo "[INFO] Launching: python scripts/train.py $* ${EXTRA_ARGS[*]}"
 echo ""
-python scripts/train.py "$@" $EXTRA_ARGS
+python scripts/train.py "$@" "${EXTRA_ARGS[@]}"

@@ -9,6 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/hardware_config.yaml"
+MJLAB_DIR="$SCRIPT_DIR/unitree_rl_mjlab"
 
 if [ ! -f "$CONFIG_FILE" ]; then
   echo "[ERROR] hardware_config.yaml not found at: $CONFIG_FILE"
@@ -61,7 +62,7 @@ fi
 
 # --- Install the mjlab package in editable mode (path-agnostic) ---
 echo "[INFO] Installing unitree_rl_mjlab[$BACKEND] in editable mode ..."
-conda run -n "$ENV_NAME" pip install -e "$MJLAB_DIR[$BACKEND]"
+conda run -n "$ENV_NAME" pip install -e "${MJLAB_DIR}[${BACKEND}]"
 
 echo ""
 echo "============================================================"

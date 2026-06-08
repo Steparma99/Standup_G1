@@ -17,7 +17,7 @@ EXTRAS_REQUIRE = {
 
 setup(
     name="unitree_rl_mjlab",
-    packages=["src"],
+    packages=find_packages(include=["src", "src.*"]),
     version="0.0.1",
     install_requires=INSTALL_REQUIRES,
     extras_require=EXTRAS_REQUIRE,
