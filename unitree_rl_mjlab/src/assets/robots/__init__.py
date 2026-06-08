@@ -7,6 +7,13 @@ unrelated robot packages are absent.
 
 from importlib import import_module
 
+from .unitree_g1.g1_constants import (
+    G1_ACTION_SCALE,
+    get_g1_prone_robot_cfg,
+    get_g1_robot_cfg,
+    get_g1_supine_robot_cfg,
+)
+
 
 def _export(module_name: str, names: list[str]) -> None:
     try:
@@ -16,13 +23,6 @@ def _export(module_name: str, names: list[str]) -> None:
     for name in names:
         globals()[name] = getattr(module, name)
 
-
-_export(".unitree_g1.g1_constants", [
-    "G1_ACTION_SCALE",
-    "get_g1_robot_cfg",
-    "get_g1_supine_robot_cfg",
-    "get_g1_prone_robot_cfg",
-])
 
 _export(".unitree_g1.g1_23dof_constants", [
     "G1_23DOF_ACTION_SCALE",
