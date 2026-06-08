@@ -11,7 +11,7 @@ from importlib import import_module
 def _export(module_name: str, names: list[str]) -> None:
     try:
         module = import_module(module_name, package=__name__)
-    except ModuleNotFoundError:
+    except (ImportError, ModuleNotFoundError):
         return
     for name in names:
         globals()[name] = getattr(module, name)
@@ -55,4 +55,3 @@ _export(".unitree_h2.h2_constants", [
     "H2_ACTION_SCALE",
     "get_h2_robot_cfg",
 ])
-
