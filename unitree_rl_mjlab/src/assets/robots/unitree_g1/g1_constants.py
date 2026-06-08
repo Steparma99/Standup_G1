@@ -6,13 +6,17 @@ import mujoco
 
 from src import SRC_PATH
 from mjlab.actuator import BuiltinPositionActuatorCfg
-from mjlab.actuator.delayed_actuator import DelayedActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.actuator import (
   ElectricActuator,
   reflected_inertia_from_two_stage_planetary,
 )
 from mjlab.utils.spec_config import CollisionCfg
+
+try:
+  from mjlab.actuator.delayed_actuator import DelayedActuatorCfg
+except (ImportError, ModuleNotFoundError):
+  DelayedActuatorCfg = None
 
 ##
 # MJCF and assets.
