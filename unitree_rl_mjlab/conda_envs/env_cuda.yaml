@@ -23,7 +23,7 @@ dependencies:
     - torchaudio>=2.7.0
 
     # MuJoCo GPU-accelerated physics (NVIDIA only)
-    - mujoco-warp==3.5.0
+    - mujoco-warp>=3.8.0.3,<3.9
 
     # mjlab framework (install.sh runs: pip install -e <repo>/unitree_rl_mjlab[cuda])
 

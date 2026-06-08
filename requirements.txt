@@ -25,7 +25,7 @@ torchvision>=0.22.0
 torchaudio>=2.7.0
 
 # --- MuJoCo GPU-accelerated physics (NVIDIA only) ---
-mujoco-warp==3.5.0
+mujoco-warp>=3.8.0.3,<3.9
 
 # --- RL framework (mjlab is a dependency of unitree_rl_mjlab) ---
 # After cloning, run: pip install -e unitree_rl_mjlab[cuda]

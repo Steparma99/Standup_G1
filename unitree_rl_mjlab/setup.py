@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 # Core dependencies (backend-agnostic)
 INSTALL_REQUIRES = [
-    "mjlab==1.2.0",
+    "mjlab>=1.4.0,<1.5",
 ]
 
 # Optional extras:
@@ -12,7 +12,7 @@ INSTALL_REQUIRES = [
 #   pip install -e ".[cuda]"  → NVIDIA GPU (adds mujoco-warp)
 EXTRAS_REQUIRE = {
     "cpu": [],                       # mjlab already pulls standard mujoco
-    "cuda": ["mujoco-warp==3.5.0"],  # NVIDIA-only GPU-accelerated physics
+    "cuda": ["mujoco-warp>=3.8.0.3,<3.9"],  # Match mjlab 1.4.x expectations
 }
 
 setup(
