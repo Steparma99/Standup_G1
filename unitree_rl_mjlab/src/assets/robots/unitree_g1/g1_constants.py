@@ -384,6 +384,8 @@ def _wrap_with_delay(
   delay_max_lag: int = 3,
 ) -> DelayedActuatorCfg:
   """Wrap a BuiltinPositionActuatorCfg with per-env action delay."""
+  if DelayedActuatorCfg is None:
+    raise ImportError("DelayedActuatorCfg is unavailable in this mjlab version")
   return DelayedActuatorCfg(
     base_cfg=base_cfg,
     delay_target="position",
@@ -392,20 +394,6 @@ def _wrap_with_delay(
     delay_per_env_phase=True,
   )
 
-
-G1_ARTICULATION_DELAYED = EntityArticulationInfoCfg(
-  actuators=(
-    _wrap_with_delay(G1_ACTUATOR_5020),
-    _wrap_with_delay(G1_ACTUATOR_7520_14),
-    _wrap_with_delay(G1_ACTUATOR_7520_22),
-    _wrap_with_delay(G1_ACTUATOR_4010),
-    _wrap_with_delay(G1_ACTUATOR_WAIST),
-    _wrap_with_delay(G1_ACTUATOR_ANKLE),
-  ),
-  soft_joint_pos_limit_factor=0.9,
-)
-
-
 def get_g1_supine_robot_cfg_with_delay() -> EntityCfg:
   """G1 supine config with DelayedActuator wrappers for action-delay DR.
 
@@ -413,11 +401,22 @@ def get_g1_supine_robot_cfg_with_delay() -> EntityCfg:
   is True in env_cfgs.py. The delay range is set via dr.sync_actuator_delays
   at reset, so delay_min/max_lag here only define the buffer capacity.
   """
+  articulation_delayed = EntityArticulationInfoCfg(
+    actuators=(
+      _wrap_with_delay(G1_ACTUATOR_5020),
+      _wrap_with_delay(G1_ACTUATOR_7520_14),
+      _wrap_with_delay(G1_ACTUATOR_7520_22),
+      _wrap_with_delay(G1_ACTUATOR_4010),
+      _wrap_with_delay(G1_ACTUATOR_WAIST),
+      _wrap_with_delay(G1_ACTUATOR_ANKLE),
+    ),
+    soft_joint_pos_limit_factor=0.9,
+  )
   return EntityCfg(
     init_state=SUPINE_KEYFRAME,
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
-    articulation=G1_ARTICULATION_DELAYED,
+    articulation=articulation_delayed,
   )
 
 
