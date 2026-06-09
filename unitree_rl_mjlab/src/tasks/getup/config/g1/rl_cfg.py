@@ -40,7 +40,11 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
         experiment_name="g1_getup",
-        logger="tensorboard",
+        # W&B online for real-time dashboards: every Episode_Reward/<term> and
+        # metric is auto-plotted. Requires `wandb login` once (or set WANDB_API_KEY);
+        # do NOT export WANDB_MODE=offline if you want live streaming.
+        logger="wandb",
+        wandb_project="g1_getup",
         save_interval=100,
         num_steps_per_env=64,
         max_iterations=12000,

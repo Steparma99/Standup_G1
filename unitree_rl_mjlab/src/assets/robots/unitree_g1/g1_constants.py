@@ -233,8 +233,8 @@ KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
 # NOTE: the previous value (-0.866,-0.010,0.500,0.018) was only a 60° tilt — the robot
 # was reclined, not lying down, with legs in the air and feet through the floor.
 SUPINE_KEYFRAME = EntityCfg.InitialStateCfg(
-    pos=(0.000, 0.000, 0.072),
-    rot=(0.7247, 0.0000, -0.6891, 0.0000),
+    pos=(0.000, 0.000, 0.078),  # rest_z 0.073 + ~0.5cm: spawn just above the floor
+    rot=(0.7071, 0.0000, -0.7071, 0.0000),
     joint_pos={
     ".*_elbow_joint": 1,
     "left_shoulder_roll_joint": 0.2,
@@ -249,8 +249,8 @@ SUPINE_KEYFRAME = EntityCfg.InitialStateCfg(
 # Robot lying flat on its front (prone, face down). Orientation is a +90° rotation
 # about the +Y axis, settled with physics to the resting pose below.
 PRONE_KEYFRAME = EntityCfg.InitialStateCfg(
-   pos=(0.000, 0.000, 0.099),
-    rot=(0.6919, 0.0000, 0.7220, 0.0000),
+    pos=(0.000, 0.000, 0.139),  # rest_z 0.134 + ~0.5cm: spawn just above the floor
+    rot=(0.7071, 0.0000, 0.7071, 0.0000),
     joint_pos={
     ".*_elbow_joint": 1,
     "left_shoulder_roll_joint": 0.2,
@@ -261,6 +261,77 @@ PRONE_KEYFRAME = EntityCfg.InitialStateCfg(
   },  joint_vel={".*": 0.0},
 )
 
+# Robot lying on its LEFT side. Orientation is a -90° roll about the +X axis
+# (w,x,y,z)=(0.7071,-0.7071,0,0): body +Y (left) rotates down to the floor. The
+# bottom (left) arm extends forward along the floor in line with the body; the
+# top (right) arm rolls down and reaches its palm forward to plant on the floor
+# in front of the chest (a push-up prop, so the hand is usable to push up).
+# pos.z is rest height + ~0.5cm clearance (real-collision bisection,
+# scripts/diag_contact_geoms.py): starts just above the floor, no penetration.
+SIDE_LEFT_KEYFRAME = EntityCfg.InitialStateCfg(
+    pos=(0.000, 0.000, 0.193),  # rest_z 0.188 + ~0.5cm: spawn just above the floor
+    rot=(0.7071, -0.7071, 0.0000, 0.0000),
+    joint_pos={
+        ".*_ankle_pitch_joint": -0.2,
+        ".*_hip_pitch_joint": -0.3,
+        ".*_knee_joint": 0.4,
+        # bottom (left) arm: extend forward along the floor in line with the body
+        "left_shoulder_pitch_joint": 0.2,
+        "left_shoulder_roll_joint": 0,
+        "left_elbow_joint": 0.5,
+        # top (right) arm: roll swings it down toward the floor, pitch+elbow reach
+        # the palm forward to plant it in front of the chest (push-up prop)
+        "right_shoulder_pitch_joint": 0.2,
+        "right_shoulder_roll_joint": -0.2,
+        "right_elbow_joint": 0.5,
+    },
+    joint_vel={".*": 0.0},
+)
+
+# Robot lying flat on its RIGHT side. Mirror of SIDE_LEFT: a +90° roll about +X
+# (w,x,y,z)=(0.7071,0.7071,0,0). Same (symmetric) joints.
+SIDE_RIGHT_KEYFRAME = EntityCfg.InitialStateCfg(
+    pos=(0.000, 0.000, 0.193),  # rest_z 0.188 + ~0.5cm: spawn just above the floor
+    rot=(0.7071, 0.7071, 0.0000, 0.0000),
+    joint_pos={
+        ".*_ankle_pitch_joint": -0.2,
+        ".*_hip_pitch_joint": -0.3,
+        ".*_knee_joint": 0.4,
+        # bottom (right) arm: extend forward along the floor in line with the body
+        "left_shoulder_pitch_joint": 0.2,
+        "left_shoulder_roll_joint": 0,
+        "left_elbow_joint": 0.5,
+        # top (left) arm: roll swings it down toward the floor, pitch+elbow reach
+        # the palm forward to plant it in front of the chest (push-up prop)
+        "right_shoulder_pitch_joint": 0.2,
+        "right_shoulder_roll_joint": 0,
+        "right_elbow_joint": 0.5,
+    },
+    joint_vel={".*": 0.0},
+)
+
+# Robot seated on the ground: torso near-upright with a slight backward lean
+# (-14° about +Y), deep hip flexion + bent knees so it rests on a stable tripod —
+# buttocks (pelvis) + both feet flat on the floor (the natural pre-stand sitting
+# pose). pos.z is rest height + ~0.5cm clearance (real-collision bisection,
+# scripts/diag_contact_geoms.py): starts seated on the floor, no penetration.
+SEATED_KEYFRAME = EntityCfg.InitialStateCfg(
+    pos=(0.000, 0.000, 0.155),  # rest_z 0.150 + ~0.5cm: starts seated ON the floor
+    rot=(0.9925, 0.0000, -0.1219, 0.0000),
+    joint_pos={
+        # deep hip+knee flexion with a slight backward lean so the robot rests on
+        # a stable tripod: buttocks (pelvis) + both feet flat on the floor.
+        ".*_hip_pitch_joint": -2.24,
+        ".*_knee_joint": 1.87,
+        ".*_ankle_pitch_joint": -0.45,
+        ".*_shoulder_pitch_joint": 0.3,
+        ".*_elbow_joint": 0.5,
+        "left_shoulder_roll_joint": 0.25,
+        "right_shoulder_roll_joint": -0.25,
+    },
+    joint_vel={".*": 0.0},
+)
+
 ##
 # Collision config.
 ##
@@ -269,7 +340,9 @@ PRONE_KEYFRAME = EntityCfg.InitialStateCfg(
 # Self-collisions are given condim=1 while foot collisions
 # are given condim=3. Stand-up-critical support contacts also get condim=3
 # with higher sliding friction so the robot can push off the floor without
-# excessive slipping on hands, elbows, pelvis, wrists, and torso.
+# excessive slipping on hands, elbows, pelvis, wrists, torso, and head.
+# The head (head_collision sphere) is condim=3 + friction so it can act as a
+# support / roll-over contact, not just an impact-detection point.
 FULL_COLLISION = CollisionCfg(
   geom_names_expr=(".*_collision",),
   condim={
@@ -279,6 +352,7 @@ FULL_COLLISION = CollisionCfg(
     r"^(left|right)_elbow_yaw_collision$": 3,
     r"^pelvis_collision$": 3,
     r"^torso_collision$": 3,
+    r"^head_collision$": 3,
     ".*_collision": 1,
   },
   priority={r"^(left|right)_foot[1-7]_collision$": 1},
@@ -289,6 +363,7 @@ FULL_COLLISION = CollisionCfg(
     r"^(left|right)_elbow_yaw_collision$": (1.0, 0.005, 0.0001),
     r"^pelvis_collision$": (0.8, 0.005, 0.0001),
     r"^torso_collision$": (0.6, 0.005, 0.0001),
+    r"^head_collision$": (0.8, 0.005, 0.0001),
   },
 )
 
@@ -303,6 +378,7 @@ FULL_COLLISION_WITHOUT_SELF = CollisionCfg(
     r"^(left|right)_elbow_yaw_collision$": 3,
     r"^pelvis_collision$": 3,
     r"^torso_collision$": 3,
+    r"^head_collision$": 3,
     ".*_collision": 1,
   },
   priority={r"^(left|right)_foot[1-7]_collision$": 1},
@@ -313,6 +389,7 @@ FULL_COLLISION_WITHOUT_SELF = CollisionCfg(
     r"^(left|right)_elbow_yaw_collision$": (1.0, 0.005, 0.0001),
     r"^pelvis_collision$": (0.8, 0.005, 0.0001),
     r"^torso_collision$": (0.6, 0.005, 0.0001),
+    r"^head_collision$": (0.8, 0.005, 0.0001),
   },
 )
 

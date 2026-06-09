@@ -204,3 +204,81 @@ def imu_lin_acc(
     from mjlab.envs.mdp.observations import builtin_sensor
     raw = builtin_sensor(env, sensor_name)  # [B, 3]  m/s²
     return raw / _G_MS2  # [B, 3]  dimensionless specific-force / g
+
+
+class ImuLinAcc:
+    """Stateful accelerometer model for the ACTOR observation.
+
+    Wraps the clean ``imu_lin_acc`` ground-truth reading (specific force / g) with
+    the deterministic, on-board parts of a real MEMS accelerometer so the policy
+    learns on a deployable signal:
+
+        out = bias + EMA_lp( specific_force / g )
+
+    Pipeline placement (see ObservationTermCfg docstring): this function runs first,
+    then the manager applies, in order, ``noise`` (white sensor noise), ``clip``
+    (saturation), ``delay`` (latency) and ``history``. So the full effective model is
+
+        history( delay( clip( bias + LP(true/g) + white_noise ) ) )
+
+    which mirrors a hardware IMU: anti-alias low-pass on the true signal, a slowly
+    varying bias, additive white noise, ADC saturation and bus/read latency.
+
+    Statefulness (per-env, lives only on the actor's instance):
+      - ``_ema``  : low-pass filter memory, re-seeded with the raw reading on reset.
+      - ``_bias`` : per-axis offset, resampled every episode reset to model drift.
+
+    The CRITIC must NOT use this class: it should observe the clean ground-truth
+    accelerometer (plain :func:`imu_lin_acc`) with no bias/LP/noise. The env config
+    wires that override in ``_get_critic_obs_terms``.
+
+    Config via ``ObservationTermCfg.params`` (all optional):
+      sensor_name : accelerometer sensor (default "robot/imu_lin_acc").
+      lp_alpha    : EMA coefficient in (0, 1]; lower = more smoothing (default 0.3).
+      bias_std    : per-axis bias 1-sigma in g (default 0.02).
+      bias_clip   : hard clip on the sampled bias in g (default 0.05).
+    """
+
+    def __init__(self, cfg, env: "ManagerBasedRlEnv"):
+        self._env = env
+        self._device = env.device
+        self._num_envs = env.num_envs
+        p = cfg.params or {}
+        self._sensor_name = p.get("sensor_name", "robot/imu_lin_acc")
+        self._alpha = float(p.get("lp_alpha", 0.3))
+        self._bias_std = float(p.get("bias_std", 0.02))
+        self._bias_clip = float(p.get("bias_clip", 0.05))
+        self._ema = torch.zeros(self._num_envs, 3, device=self._device)
+        self._bias = torch.zeros(self._num_envs, 3, device=self._device)
+        # Per-env flag: re-seed the EMA with the first post-reset reading so the
+        # filter starts on the true value instead of decaying up from zero.
+        self._needs_seed = torch.ones(self._num_envs, dtype=torch.bool, device=self._device)
+        self._resample_bias(slice(None))
+
+    def _resample_bias(self, env_ids) -> None:
+        if isinstance(env_ids, slice):
+            n = self._num_envs
+        else:
+            n = len(env_ids)
+        b = torch.randn(n, 3, device=self._device) * self._bias_std
+        b = b.clamp(-self._bias_clip, self._bias_clip)
+        self._bias[env_ids] = b
+
+    def reset(self, env_ids=None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        # Re-seed the LP filter on the next call; resample bias to model drift.
+        self._needs_seed[env_ids] = True
+        self._resample_bias(env_ids)
+
+    def __call__(self, env: "ManagerBasedRlEnv", **kwargs) -> torch.Tensor:
+        raw = imu_lin_acc(env, sensor_name=self._sensor_name)  # [B, 3] clean, in g
+        # Seed EMA with the raw reading for freshly-reset envs.
+        if bool(self._needs_seed.any()):
+            seed = self._needs_seed
+            self._ema = self._ema.clone()
+            self._ema[seed] = raw[seed]
+            self._needs_seed = self._needs_seed.clone()
+            self._needs_seed[seed] = False
+        self._ema = self._alpha * raw + (1.0 - self._alpha) * self._ema
+        return self._ema + self._bias

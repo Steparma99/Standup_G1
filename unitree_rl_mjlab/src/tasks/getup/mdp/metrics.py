@@ -40,12 +40,30 @@ from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 
-from .events import get_episode_state
+from .events import _ASSIST_FORCE_ATTR, get_episode_state
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+def _get_action_term(env: "ManagerBasedRlEnv", action_name: str = "joint_pos"):
+    return env.action_manager.get_term(action_name)
+
+
+def assistance_force(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Per-env assistance-curriculum support force [B,] in Newtons.
+
+    Reads the live per-env force buffer published by AssistanceCurriculum. The
+    episode average should DECREASE over training as envs learn to stand and
+    their support force decays toward zero. Returns zeros when the curriculum is
+    disabled (attribute absent).
+    """
+    force = getattr(env, _ASSIST_FORCE_ATTR, None)
+    if force is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return force
 
 # ---------------------------------------------------------------------------
 # Stage boundaries (pelvis height in metres, matching reward gates)
@@ -246,6 +264,35 @@ def action_acc_mean(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return torch.norm(acc, dim=-1)
 
 
+def raw_action_min(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Minimum raw policy action before defensive clamp [B,]."""
+    term = _get_action_term(env, action_name)
+    return term.raw_policy_actions.min(dim=-1).values
+
+
+def raw_action_max(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Maximum raw policy action before defensive clamp [B,]."""
+    term = _get_action_term(env, action_name)
+    return term.raw_policy_actions.max(dim=-1).values
+
+
+def raw_action_clip_fraction(
+    env: "ManagerBasedRlEnv",
+    threshold: float = 1.0,
+    action_name: str = "joint_pos",
+) -> torch.Tensor:
+    """Fraction of raw policy dimensions outside [-threshold, threshold] [B,]."""
+    term = _get_action_term(env, action_name)
+    raw = term.raw_policy_actions
+    return (raw.abs() > threshold).float().mean(dim=-1)
+
+
 # ---------------------------------------------------------------------------
 # P1.3 — Torque / actuator force saturation
 # ---------------------------------------------------------------------------
@@ -308,6 +355,103 @@ def torque_power_mean(
     qvel = asset.data.joint_vel[:, ctrl_ids]  # [B, nu]
     power = (tau * qvel).abs()
     return power.mean(dim=-1)
+
+
+def joint_target_clamp_fraction(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Fraction of target dimensions that exceeded joint limits before clamp [B,]."""
+    term = _get_action_term(env, action_name)
+    target = getattr(term, "filtered_target_unclamped", term.applied_target)
+    asset: Entity = env.scene[asset_cfg.name]
+    limits = asset.data.soft_joint_pos_limits[:, term.target_ids]
+    clamped = (target < limits[..., 0]) | (target > limits[..., 1])
+    return clamped.float().mean(dim=-1)
+
+
+def joint_target_over_limit_mean(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean absolute target exceedance beyond joint limits [B,]."""
+    term = _get_action_term(env, action_name)
+    target = getattr(term, "filtered_target_unclamped", term.applied_target)
+    asset: Entity = env.scene[asset_cfg.name]
+    limits = asset.data.soft_joint_pos_limits[:, term.target_ids]
+    over = torch.clamp(target - limits[..., 1], min=0.0) + torch.clamp(
+        limits[..., 0] - target, min=0.0
+    )
+    return over.mean(dim=-1)
+
+
+def joint_target_over_limit_max(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Maximum absolute target exceedance beyond joint limits [B,]."""
+    term = _get_action_term(env, action_name)
+    target = getattr(term, "filtered_target_unclamped", term.applied_target)
+    asset: Entity = env.scene[asset_cfg.name]
+    limits = asset.data.soft_joint_pos_limits[:, term.target_ids]
+    over = torch.clamp(target - limits[..., 1], min=0.0) + torch.clamp(
+        limits[..., 0] - target, min=0.0
+    )
+    return over.max(dim=-1).values
+
+
+def pd_tracking_error_mean(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean absolute PD tracking error |q_des - q| across joints [B,]."""
+    term = _get_action_term(env, action_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    q = asset.data.joint_pos[:, term.target_ids]
+    err = (term.applied_target - q).abs()
+    return err.mean(dim=-1)
+
+
+def pd_tracking_error_max(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Maximum absolute PD tracking error |q_des - q| across joints [B,]."""
+    term = _get_action_term(env, action_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    q = asset.data.joint_pos[:, term.target_ids]
+    err = (term.applied_target - q).abs()
+    return err.max(dim=-1).values
+
+
+def pd_tracking_error_l2_mean(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """L2 norm of PD tracking error, normalised by sqrt(num_joints) [B,]."""
+    term = _get_action_term(env, action_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    q = asset.data.joint_pos[:, term.target_ids]
+    err = term.applied_target - q
+    return torch.norm(err, dim=-1) / (err.shape[-1] ** 0.5)
+
+
+def pd_tracking_error_standing_mean(
+    env: "ManagerBasedRlEnv",
+    action_name: str = "joint_pos",
+    h_standing: float = _H_STANDING,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean absolute PD tracking error while standing; zero otherwise [B,]."""
+    asset: Entity = env.scene[asset_cfg.name]
+    standing = (asset.data.root_link_pos_w[:, 2] >= h_standing).float()
+    return pd_tracking_error_mean(env, action_name=action_name, asset_cfg=asset_cfg) * standing
 
 
 # ---------------------------------------------------------------------------

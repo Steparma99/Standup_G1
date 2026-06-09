@@ -18,6 +18,14 @@ unitree_rl_mjlab/wandb/
 unitree_rl_mjlab/keyframe_check/
 unitree_rl_mjlab/screenshot.png
 
+# Same artifacts but CWD-agnostic (match a dir of this name at ANY depth, so a run
+# launched from the repo root on the server is also covered).
+logs/
+wandb/
+outputs/
+runs/
+MUJOCO_LOG.TXT
+
 # Model checkpoints and exported policies
 *.pt
 *.onnx

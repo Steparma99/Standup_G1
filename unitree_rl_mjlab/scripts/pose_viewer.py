@@ -8,6 +8,7 @@ g1_constants.py.
 KEYS (inside the viewer window):
   Load a pose:
     1  SUPINE     2  PRONE     3  HOME     4  KNEES_BENT
+    5  SIDE_LEFT  6  SIDE_RIGHT  7  SEATED
   Edit the pose LIVE (rotations are about the WORLD axes, 5 deg per press):
     W / S   pitch  + / -   (tilt forward / backward -- the supine<->prone axis)
     A / D   roll   + / -   (tilt left / right)
@@ -15,6 +16,7 @@ KEYS (inside the viewer window):
     Z / X   height - / +   (lower / raise the base, 1 cm per press)
   Other:
     P   play / pause physics   (test if the pose holds or collapses)
+    G   toggle COLLISION geoms (group 3) on/off  (see hand/head/foot capsules)
     0   reset to the loaded keyframe (undo your edits)
     C   print current pos/rot   (copy these into g1_constants.py)
     mouse = orbit / zoom camera
@@ -48,6 +50,9 @@ from src.assets.robots.unitree_g1.g1_constants import (  # noqa: E402
     HOME_KEYFRAME,
     KNEES_BENT_KEYFRAME,
     PRONE_KEYFRAME,
+    SEATED_KEYFRAME,
+    SIDE_LEFT_KEYFRAME,
+    SIDE_RIGHT_KEYFRAME,
     SUPINE_KEYFRAME,
 )
 
@@ -58,6 +63,9 @@ POSES = {
     ord("2"): ("PRONE", PRONE_KEYFRAME),
     ord("3"): ("HOME", HOME_KEYFRAME),
     ord("4"): ("KNEES_BENT", KNEES_BENT_KEYFRAME),
+    ord("5"): ("SIDE_LEFT", SIDE_LEFT_KEYFRAME),
+    ord("6"): ("SIDE_RIGHT", SIDE_RIGHT_KEYFRAME),
+    ord("7"): ("SEATED", SEATED_KEYFRAME),
 }
 
 ROT_STEP_DEG = 5.0
@@ -89,6 +97,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="headless: print all poses and exit")
     parser.add_argument("--start", default="SUPINE", help="pose to start on")
+    parser.add_argument("--collision", action="store_true",
+                        help="start with collision geoms (group 3) visible")
     args = parser.parse_args()
 
     model = mujoco.MjModel.from_xml_path(str(XML_PATH))
@@ -104,6 +114,7 @@ def main() -> None:
         "label": "",
         "kf": None,
         "paused": True,
+        "show_collision": args.collision,
     }
 
     def write_pose_to_data():
@@ -183,6 +194,10 @@ def main() -> None:
             elif keycode == ord("P"):
                 st["paused"] = not st["paused"]
                 print(f"    physics {'PAUSED' if st['paused'] else 'RUNNING'}")
+            elif keycode == ord("G"):
+                st["show_collision"] = not st["show_collision"]
+                print(f"    collision geoms (group 3) "
+                      f"{'VISIBLE' if st['show_collision'] else 'hidden'}")
             elif keycode in actions:
                 actions[keycode]()
         except Exception as exc:  # never let a key crash the viewer
@@ -199,6 +214,8 @@ def main() -> None:
             if not st["paused"]:
                 data.ctrl[:] = 0.0
                 mujoco.mj_step(model, data)
+            # group 2 = visual meshes, group 3 = collision geoms (hidden by default)
+            viewer.opt.geomgroup[3] = 1 if st["show_collision"] else 0
             viewer.sync()
             time.sleep(max(0.0, dt - (time.time() - t0)))
 
