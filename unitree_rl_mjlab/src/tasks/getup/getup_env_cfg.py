@@ -579,9 +579,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
     ##
 
     rewards = {
+        # Weight lowered 2.0→1.0: this dense, STATIC height reward was the main thing
+        # the policy farmed by parking in a half-propped pose. height_progress (the
+        # dynamic signal) now dominates the rise; no_progress_timeout punishes parking.
         "base_height_exp": RewardTermCfg(
             func=mdp.base_height_exp,
-            weight=2.0,
+            weight=1.0,
             params={
                 "target_height": 0.728,  # G1 standing pelvis height
                 "asset_cfg": SceneEntityCfg("robot"),
@@ -596,10 +599,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             },
         ),
         # True torso uprightness (exp(-k·(1+proj_grav_z))): ~0 from any flat pose,
-        # sharp gradient only as the torso verticalises. weight 2.0 → max 2.0/step.
+        # sharp gradient only as the torso verticalises. Weight lowered 2.0→1.0: like
+        # base_height_exp it is a STATIC reward farmable in the half-propped pose, so
+        # it must not dominate the return over the dynamic rise/progress signals.
         "body_up_exp": RewardTermCfg(
             func=mdp.body_up_exp,
-            weight=2.0,
+            weight=1.0,
             params={"k": 4.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "stand_on_feet": RewardTermCfg(
@@ -821,6 +826,19 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={
                 "sensor_name": "contact_head",
                 "force_threshold": _HEAD_IMPACT_TERMINATION_THRESHOLD,
+            },
+        ),
+        # End the episode (as a FAILURE → is_terminated penalty) if the robot stops
+        # gaining height for ~2 s. Kills the "roll up half-way and park for 1000
+        # steps farming static height rewards" local optimum, and shortens episodes
+        # so returns/advantages stop flooring the adaptive learning rate.
+        "no_progress_timeout": TerminationTermCfg(
+            func=mdp.no_progress_timeout,
+            params={
+                "min_progress": 0.02,
+                "n_stall_steps": 200,
+                "grace_steps": 50,
+                "asset_cfg": SceneEntityCfg("robot"),
             },
         ),
     }

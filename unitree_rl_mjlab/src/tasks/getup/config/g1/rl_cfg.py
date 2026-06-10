@@ -29,14 +29,21 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             value_loss_coef=1.0,
             use_clipped_value_loss=True,
             clip_param=0.2,
-            entropy_coef=0.008,
+            # Raised 0.008→0.015: entropy collapsed to ~0.3 within ~1k iters last run
+            # (premature convergence to the lie-still local optimum). Keep exploration
+            # alive longer so the policy actually tries to rise.
+            entropy_coef=0.015,
             num_learning_epochs=5,
             num_mini_batches=8,
             learning_rate=5.0e-4,
             schedule="adaptive",
             gamma=0.99,
             lam=0.95,
-            desired_kl=0.01,
+            # Raised 0.01→0.02: last run the adaptive-KL schedule floored the LR to ~0
+            # within ~1k iters (huge early advantages from 1000-step static-reward
+            # farming). More KL tolerance keeps the LR from permanently collapsing;
+            # shorter episodes from no_progress_timeout also shrink those advantages.
+            desired_kl=0.02,
             max_grad_norm=1.0,
         ),
         experiment_name="g1_getup",

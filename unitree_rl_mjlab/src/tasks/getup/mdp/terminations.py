@@ -10,6 +10,7 @@ Current terminations:
   - root_height_below_minimum     (mjlab built-in, deep penetration safety net)
   - joint_velocity_explosion      (finite blow-up guard, here)
   - standing_fall_timeout         (fell after standing for M steps, here)
+  - no_progress_timeout           (stalled below a height record for N steps, here)
 """
 
 from __future__ import annotations
@@ -88,6 +89,51 @@ def standing_fall_timeout(
         torch.zeros_like(state["fall_counter"]),
     )
     return state["fall_counter"] >= n_fall_steps
+
+
+def no_progress_timeout(
+    env: ManagerBasedRlEnv,
+    min_progress: float = 0.02,
+    n_stall_steps: int = 200,
+    grace_steps: int = 50,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Terminate if the robot stops gaining height for too long [B].
+
+    Without this, an episode runs the full 1000 steps even if the policy just
+    rolls into a half-propped pose and parks there, farming the dense static
+    height rewards (base_height_exp / body_up_exp) forever. That makes "lie
+    still until timeout" the highest-return strategy and inflates returns so much
+    that the early advantages floor the adaptive learning rate.
+
+    Logic: track the best pelvis height reached this episode. Whenever the robot
+    beats that record by at least `min_progress` (m), bump the record and reset
+    the stall counter; otherwise increment the counter. Fire once the counter
+    reaches `n_stall_steps` consecutive steps without a new record. Updating the
+    record ONLY on a real jump means a slow-but-genuine ascent keeps resetting the
+    counter and is never cut short — only a true height plateau terminates. A
+    `grace_steps` window at episode start is exempt so the settle/landing phase
+    and the first attempt are never cut short.
+
+    Registered WITHOUT time_out=True, so it counts as a failure termination and
+    activates the is_terminated penalty — stalling is punished, not free.
+
+    Reads/writes only its own episode state (best_height, stall_counter), so the
+    terminations-before-rewards ordering introduces no lag here.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    state = get_episode_state(env, asset)
+    h = asset.data.root_link_pos_w[:, 2]
+    improved = h > state["best_height"] + min_progress
+    state["best_height"] = torch.where(improved, h, state["best_height"])
+    state["stall_counter"] = torch.where(
+        improved,
+        torch.zeros_like(state["stall_counter"]),
+        state["stall_counter"] + 1,
+    )
+    stalled = state["stall_counter"] >= n_stall_steps
+    past_grace = env.episode_length_buf > grace_steps
+    return stalled & past_grace
 
 
 def head_impact_termination(

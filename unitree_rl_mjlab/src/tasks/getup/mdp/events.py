@@ -311,6 +311,10 @@ def get_episode_state(env: "ManagerBasedRlEnv", asset: "Entity") -> dict:
         "ever_stood": torch.zeros(n, device=device, dtype=torch.bool),
         # Consecutive steps below the threshold after ever_stood became True.
         "fall_counter": torch.zeros(n, device=device, dtype=torch.long),
+        # Best pelvis height reached this episode (for the no-progress stall timeout).
+        "best_height": asset.data.root_link_pos_w[:, 2].clone(),
+        # Consecutive steps since the last new height record (no-progress stall timeout).
+        "stall_counter": torch.zeros(n, device=device, dtype=torch.long),
     }
     setattr(env, _EPISODE_STATE_ATTR, state)
     return state
@@ -337,3 +341,5 @@ def reset_episode_state(
     state["standing_counter"][env_ids] = 0
     state["ever_stood"][env_ids] = False
     state["fall_counter"][env_ids] = 0
+    state["best_height"][env_ids] = asset.data.root_link_pos_w[env_ids, 2]
+    state["stall_counter"][env_ids] = 0
