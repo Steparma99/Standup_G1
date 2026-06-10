@@ -232,6 +232,10 @@ class AssistanceCurriculum:
         self._force_min = float(p.get("force_min", 0.0))
         self._success_height = float(p["success_height"])
         self._unactuated_steps = int(p.get("unactuated_steps", 0))
+        # Pelvis height (m) below which an episode earns no decay credit (stage-1
+        # entry). Above it the assist anneals in proportion to the peak height
+        # reached, so partial progress still fades the support (see reset()).
+        self._progress_floor = float(p.get("progress_floor", 0.20))
 
         # Per-env state.
         self._force = torch.full(
@@ -261,13 +265,19 @@ class AssistanceCurriculum:
     def reset(self, env_ids=None) -> None:
         if env_ids is None:
             env_ids = torch.arange(self._num_envs, device=self._device)
-        # Decay the force for envs that reached standing height this episode.
-        succeeded = self._peak_height[env_ids] >= self._success_height
-        if succeeded.any():
-            won = env_ids[succeeded]
-            self._force[won] = torch.clamp(
-                self._force[won] - self._decay, min=self._force_min
-            )
+        # Partial-credit annealing: decay in proportion to how close the episode got
+        # to standing (peak height vs success_height, floored at progress_floor =
+        # stage-1 entry). Full success (peak >= success_height) -> full decay, exactly
+        # as before; partial progress still anneals the assist, so the support fades
+        # as competence grows and the FINAL policy trains (near-)unassisted — closing
+        # the train/eval gap that left the old policy dependent on the 120 N lift.
+        span = max(self._success_height - self._progress_floor, 1e-6)
+        progress = torch.clamp(
+            (self._peak_height[env_ids] - self._progress_floor) / span, 0.0, 1.0
+        )
+        self._force[env_ids] = torch.clamp(
+            self._force[env_ids] - self._decay * progress, min=self._force_min
+        )
         # Clear episode peak + any residual applied wrench for the reset envs.
         self._peak_height[env_ids] = 0.0
         n = len(env_ids) if not isinstance(env_ids, slice) else self._num_envs

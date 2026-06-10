@@ -579,33 +579,19 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
     ##
 
     rewards = {
-        # Weight lowered 2.0→1.0: this dense, STATIC height reward was the main thing
-        # the policy farmed by parking in a half-propped pose. height_progress (the
-        # dynamic signal) now dominates the rise; no_progress_timeout punishes parking.
-        "base_height_exp": RewardTermCfg(
-            func=mdp.base_height_exp,
-            weight=1.0,
+        # MULTIPLICATIVE task reward (HoST-style): upright AND tall, in [0, 1].
+        # Replaces the additive trio base_height_exp + torso_height_exp + body_up_exp,
+        # which the policy farmed by satisfying ONE factor (parking half-propped:
+        # body_up≈0.8) without ever rising. The product up·height is high only when
+        # BOTH are high, so that local optimum is no longer rewarded. Dominant weight.
+        "task_stand": RewardTermCfg(
+            func=mdp.task_stand,
+            weight=2.5,
             params={
                 "target_height": 0.728,  # G1 standing pelvis height
+                "k_up": 4.0,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
-        ),
-        "torso_height_exp": RewardTermCfg(
-            func=mdp.torso_height_exp,
-            weight=1.0,
-            params={
-                "target_height": 1.1,  # G1 torso_link height when standing
-                "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.
-            },
-        ),
-        # True torso uprightness (exp(-k·(1+proj_grav_z))): ~0 from any flat pose,
-        # sharp gradient only as the torso verticalises. Weight lowered 2.0→1.0: like
-        # base_height_exp it is a STATIC reward farmable in the half-propped pose, so
-        # it must not dominate the return over the dynamic rise/progress signals.
-        "body_up_exp": RewardTermCfg(
-            func=mdp.body_up_exp,
-            weight=1.0,
-            params={"k": 4.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "stand_on_feet": RewardTermCfg(
             func=mdp.stand_on_feet,

@@ -108,6 +108,39 @@ def body_up_exp(
     return torch.exp(-k * (1.0 + z_axis))
 
 
+def task_stand(
+    env: ManagerBasedRlEnv,
+    target_height: float = 0.728,
+    k_up: float = 4.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """MULTIPLICATIVE get-up task reward: upright AND tall, in [0, 1] [B,].
+
+    Replaces the additive trio (base_height_exp + torso_height_exp + body_up_exp).
+    Those summed terms could be farmed by satisfying ONE of them — the policy rolled
+    into a half-propped pose (body_up≈0.8) and parked, banking the sum for the whole
+    episode without ever rising. HoST avoids this by MULTIPLYING the task factors:
+
+        reward = up_term · height_term
+
+      - height_term = clamp(h, 0, target)/target  ∈ [0, 1]  (pelvis height)
+      - up_term     = exp(-k·(1 + proj_grav_z))   ∈ [0, 1]  (torso uprightness;
+                      1 upright, ~0.018 flat, ~0 inverted — same form as body_up_exp)
+
+    The product is high ONLY when the robot is upright AND tall: you cannot raise it
+    by improving one factor while the other stays near zero, so the half-propped
+    local optimum is no longer rewarded. NOTE: the product has a near-zero gradient
+    from a fully flat pose (both factors ~0), so the additive stage-0 bootstrap
+    rewards (height_progress / prone_recovery / supine_rising_prep) and the assist
+    curriculum are what get the robot off the floor; this term takes over the rise.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    h = asset.data.root_link_pos_w[:, 2]
+    height_term = torch.clamp(h, 0.0, target_height) / target_height
+    up_term = torch.exp(-k_up * (1.0 + asset.data.projected_gravity_b[:, 2]))
+    return up_term * height_term
+
+
 def stand_on_feet(
     env: ManagerBasedRlEnv,
     sensor_name: str,

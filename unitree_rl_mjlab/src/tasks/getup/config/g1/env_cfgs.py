@@ -265,7 +265,8 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.viewer.body_name = "torso_link"
 
     # Wire up reward params that need robot-specific body/site names.
-    cfg.rewards["torso_height_exp"].params["asset_cfg"].body_names = ("torso_link",)
+    # (torso_height_exp removed: height/uprightness now live in the multiplicative
+    # task_stand reward, which uses the pelvis root — no per-robot body needed.)
     cfg.rewards["stand_on_feet"].params["asset_cfg"].site_names = site_names
     cfg.rewards["feet_slip"].params["asset_cfg"].site_names = site_names
     cfg.rewards["feet_distance"].params["asset_cfg"].site_names = site_names
