@@ -47,6 +47,11 @@ _HEAD_IMPACT_PENALTY_THRESHOLD = 250.0
 _HEAD_IMPACT_PENALTY_SCALE = 250.0
 _HEAD_IMPACT_TERMINATION_THRESHOLD = 1200.0
 
+# Grace window (env-steps) before the velocity / feet-too-high guards arm, so the
+# spawn-drop landing transient during the unactuated/settling phase never trips
+# them. Covers the G1 settle (10) + assist-unactuated (15) windows with margin.
+_GRACE_STEPS = 15
+
 _FORBIDDEN_ACTOR_TERMS = {
     "base_height",
     "body_height",
@@ -789,9 +794,34 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "nan": TerminationTermCfg(func=mdp.nan_detection),
         # Safety nets — cannot fire on a healthy fresh episode (robot starts on
         # the ground at low speed), only on simulation blow-ups.
+        # _GRACE_STEPS suppresses the velocity / feet guards during the unactuated
+        # settling window (~settle + assist-unactuated steps) so the spawn-drop
+        # landing transient never trips them (HoST gates these after unactuated_time).
         "joint_vel_explosion": TerminationTermCfg(
             func=mdp.joint_velocity_explosion,
-            params={"max_velocity": 50.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={
+                "max_velocity": 50.0,
+                "grace_steps": _GRACE_STEPS,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        ),
+        # HoST base_vel_out: blow-up guard on the floating base speed.
+        "base_vel_explosion": TerminationTermCfg(
+            func=mdp.base_velocity_out,
+            params={
+                "max_velocity": 8.0,
+                "grace_steps": _GRACE_STEPS,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        ),
+        # HoST platform/wall reset: feet waved in the air instead of planted.
+        "feet_too_high": TerminationTermCfg(
+            func=mdp.feet_too_high,
+            params={
+                "max_height": 0.35,
+                "grace_steps": _GRACE_STEPS,
+                "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
+            },
         ),
         "ground_penetration": TerminationTermCfg(
             func=mdp.root_height_below_minimum,

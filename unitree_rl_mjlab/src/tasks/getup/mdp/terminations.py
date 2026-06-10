@@ -9,8 +9,14 @@ Current terminations:
   - time_out, nan_detection       (mjlab built-ins, wired in cfg)
   - root_height_below_minimum     (mjlab built-in, deep penetration safety net)
   - joint_velocity_explosion      (finite blow-up guard, here)
+  - base_velocity_out             (base-speed blow-up guard, HoST-style, here)
+  - feet_too_high                 (legs waved in the air, HoST-style, here)
   - standing_fall_timeout         (fell after standing for M steps, here)
   - no_progress_timeout           (stalled below a height record for N steps, here)
+
+The velocity / feet guards take a `grace_steps` window so the spawn-drop landing
+transient during the unactuated/settling phase never triggers them (HoST gates its
+dof_vel / base_vel checks on real_episode_length_buf > unactuated_time the same way).
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ def _contact_force_norm(
 def joint_velocity_explosion(
     env: ManagerBasedRlEnv,
     max_velocity: float = 50.0,
+    grace_steps: int = 0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Terminate if any joint velocity exceeds a physically impossible threshold [B].
@@ -54,9 +61,61 @@ def joint_velocity_explosion(
     Catches simulation blow-ups one step before they become NaN. The threshold
     is well above any achievable G1 joint speed (~20-37 rad/s), so it never
     fires on a healthy episode or at reset.
+
+    `grace_steps` (HoST-style): the check is suppressed for the first `grace_steps`
+    env-steps so the spawn-drop landing transient during the unactuated/settling
+    window never triggers it.
     """
     asset: Entity = env.scene[asset_cfg.name]
-    return torch.any(asset.data.joint_vel.abs() > max_velocity, dim=1)
+    exploded = torch.any(asset.data.joint_vel.abs() > max_velocity, dim=1)
+    if grace_steps > 0:
+        exploded = exploded & (env.episode_length_buf > grace_steps)
+    return exploded
+
+
+def base_velocity_out(
+    env: ManagerBasedRlEnv,
+    max_velocity: float = 8.0,
+    grace_steps: int = 0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Terminate if the base linear speed blows up (HoST `base_vel_out`) [B].
+
+    Safety net against launches / simulation blow-ups of the floating base: a
+    healthy get-up moves the pelvis at ~1-2 m/s peak, so a threshold well above
+    that (default 8 m/s) only fires on a degenerate launch. Like the joint-velocity
+    guard it is suppressed for the first `grace_steps` steps so the spawn-drop
+    landing transient during the unactuated/settling window never triggers it.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    speed = torch.norm(asset.data.root_link_lin_vel_b, dim=-1)
+    out = speed > max_velocity
+    if grace_steps > 0:
+        out = out & (env.episode_length_buf > grace_steps)
+    return out
+
+
+def feet_too_high(
+    env: ManagerBasedRlEnv,
+    max_height: float = 0.35,
+    grace_steps: int = 0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Terminate if the feet are lifted too high (HoST platform/wall reset) [B].
+
+    Catches the degenerate strategy of waving the legs up in the air instead of
+    planting them to push the body up: a get-up keeps the feet near the ground
+    (they come UNDER the body), so a mean foot height above `max_height` (default
+    0.35 m) is non-physical for a real rise. Uses the mean of the foot site
+    heights; `asset_cfg` must specify the foot site_names. Suppressed for the
+    first `grace_steps` steps for symmetry with the velocity guards.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    feet_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, N_feet]
+    too_high = feet_z.mean(dim=1) > max_height
+    if grace_steps > 0:
+        too_high = too_high & (env.episode_length_buf > grace_steps)
+    return too_high
 
 
 def standing_fall_timeout(

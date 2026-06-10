@@ -272,6 +272,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["feet_distance"].params["asset_cfg"].site_names = site_names
     cfg.rewards["com_over_support"].params["asset_cfg"].site_names = site_names
     cfg.rewards["supine_rising_prep"].params["asset_cfg"].site_names = site_names
+    cfg.terminations["feet_too_high"].params["asset_cfg"].site_names = site_names
 
     # standing_posture target = HOME standing pose, with per-group joint weights:
     # legs / waist / ankles HIGH (stance-critical), arms MEDIUM, wrists LOW
