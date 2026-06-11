@@ -179,6 +179,7 @@ __all__ = [
     "reset_episode_state",
     "settle_zero_velocity",
     "AssistanceCurriculum",
+    "BetaRescalerCurriculum",
 ]
 
 
@@ -285,6 +286,87 @@ class AssistanceCurriculum:
         self._asset.write_external_wrench_to_sim(
             zeros, zeros, env_ids=env_ids, body_ids=[self._body_id]
         )
+
+# ---------------------------------------------------------------------------
+# Action-rescaler (beta) curriculum — HoST-style per-env action-scale annealing
+# ---------------------------------------------------------------------------
+
+_BETA_RESCALER_ATTR = "_beta_rescaler"  # per-env beta, read by the action term,
+                                        # the beta observation and the beta metric.
+
+
+class BetaRescalerCurriculum:
+    """Per-env action-rescaler beta that anneals 1.0 -> 0.25 on success (HoST).
+
+    The PD target is  p^d = q_default + beta * a  (the action term reads this
+    per-env beta). beta starts at `initial_beta` = 1.0, giving the policy large
+    action authority while it is still flailing on the floor, and is decremented
+    by `decrement` (0.02) every time an env's episode ends having reached the
+    standing head height (`success_head_height`), down to a floor of `beta_min`
+    (0.25 — exactly the fixed value HoST's no-curriculum ablation uses). The
+    policy OBSERVES its env's beta, so it adapts as its action scale shrinks.
+
+    This is the SAME per-env success-driven mechanism as AssistanceCurriculum
+    (the vertical support force): the help/authority fades per env, exactly as
+    fast as that env learns to stand. It is NOT a global iteration ramp, so it is
+    invariant to the number of parallel envs and the episode length.
+
+    Registered with ``mode="step"``: ``__call__`` runs every control step (track
+    whether this episode has reached the success head height) and ``reset`` is
+    called for envs starting a new episode (decrement beta for the ones that
+    succeeded, clear the per-episode success flag).
+    """
+
+    def __init__(self, cfg, env: "ManagerBasedRlEnv"):
+        p = cfg.params
+        self._asset: Entity = env.scene[p["asset_cfg"].name]
+        body_name: str = p["body_name"]
+        ids, _ = self._asset.find_bodies(body_name)
+        assert len(ids) == 1, (
+            f"BetaRescalerCurriculum: body '{body_name}' matched {len(ids)} bodies; "
+            "expected exactly one (e.g. 'torso_link')."
+        )
+        self._body_id = int(ids[0])
+        self._num_envs = env.num_envs
+        self._device = env.device
+
+        self._initial_beta = float(p["initial_beta"])
+        self._decrement = float(p["decrement"])
+        self._beta_min = float(p["beta_min"])
+        self._success_head_height = float(p["success_head_height"])
+
+        # Per-env state.
+        self._beta = torch.full(
+            (self._num_envs,), self._initial_beta, device=self._device
+        )
+        # Did this episode reach the success head height at any step?
+        self._reached_success = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.bool
+        )
+
+        # Expose the per-env beta tensor for the action term / obs / metric.
+        setattr(env, _BETA_RESCALER_ATTR, self._beta)
+
+    def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
+        del env_ids, kwargs  # step events always act on all envs
+        # Head-height proxy = tracked body (torso_link) world-frame z.
+        h_head = self._asset.data.body_link_pos_w[:, self._body_id, 2]
+        self._reached_success |= h_head >= self._success_head_height
+
+    def reset(self, env_ids=None) -> None:
+        if env_ids is None:
+            env_ids = torch.arange(self._num_envs, device=self._device)
+        # Decrement beta by a fixed step for envs whose just-ended episode reached
+        # the success head height; clamp at the floor. Binary credit (full step on
+        # success), exactly as HoST specifies for the per-episode decrement rule.
+        succeeded = self._reached_success[env_ids]
+        self._beta[env_ids] = torch.clamp(
+            self._beta[env_ids] - self._decrement * succeeded.to(self._beta.dtype),
+            min=self._beta_min,
+        )
+        # Clear the per-episode success flag for the reset envs.
+        self._reached_success[env_ids] = False
+
 
 # ---------------------------------------------------------------------------
 # Per-env episode progress state

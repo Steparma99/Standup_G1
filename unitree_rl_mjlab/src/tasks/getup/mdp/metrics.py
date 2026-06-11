@@ -40,7 +40,7 @@ from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 
-from .events import _ASSIST_FORCE_ATTR, get_episode_state
+from .events import _ASSIST_FORCE_ATTR, _BETA_RESCALER_ATTR, get_episode_state
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -64,6 +64,19 @@ def assistance_force(env: "ManagerBasedRlEnv") -> torch.Tensor:
     if force is None:
         return torch.zeros(env.num_envs, device=env.device)
     return force
+
+
+def beta_rescaler_value(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Per-env action-rescaler beta [B,] (HoST action-scale curriculum).
+
+    Reads the live per-env beta published by BetaRescalerCurriculum. The episode
+    average should DECREASE over training (1.0 -> 0.25 floor) as envs learn to
+    stand and their action authority anneals. Returns ones when disabled.
+    """
+    beta = getattr(env, _BETA_RESCALER_ATTR, None)
+    if beta is None:
+        return torch.ones(env.num_envs, device=env.device)
+    return beta
 
 # ---------------------------------------------------------------------------
 # Stage boundaries (pelvis height in metres, matching reward gates)

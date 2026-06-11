@@ -9,6 +9,9 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
+from mjlab.utils.lab_api.math import euler_xyz_from_quat
+
+from .events import _BETA_RESCALER_ATTR
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -38,6 +41,36 @@ def _flatten_contact_force(sensor: ContactSensor, env: ManagerBasedRlEnv) -> tor
     else:
         force_flat = force.flatten(start_dim=1)
     return torch.sign(force_flat) * torch.log1p(torch.abs(force_flat))
+
+
+def base_roll_pitch(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Base roll and pitch from the root quaternion [B, 2] (HoST r_t, q_t).
+
+    HoST's state vector uses the base roll and pitch as two scalars (not the full
+    projected-gravity vector). Extrinsic-XYZ Euler from the root link quaternion;
+    yaw is intentionally dropped (the get-up task is yaw-invariant). Both angles
+    are in radians, wrapped to (-pi, pi].
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    roll, pitch, _ = euler_xyz_from_quat(asset.data.root_link_quat_w)
+    return torch.stack((roll, pitch), dim=-1)  # [B, 2]
+
+
+def beta_rescaler(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Per-env action-rescaler beta [B, 1] (HoST observed action scale).
+
+    Reads the live per-env beta published by BetaRescalerCurriculum (anneals
+    1.0 -> 0.25 on success). The policy observes it so it can adapt as its action
+    authority shrinks. Returns ones (beta = 1.0) when the curriculum is disabled
+    or before it has been initialised (e.g. obs-manager dim probing at build).
+    """
+    beta = getattr(env, _BETA_RESCALER_ATTR, None)
+    if beta is None:
+        return torch.ones(env.num_envs, 1, device=env.device)
+    return beta.unsqueeze(-1)  # [B, 1]
 
 
 def base_height(

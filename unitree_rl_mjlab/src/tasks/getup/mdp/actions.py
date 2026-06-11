@@ -24,6 +24,8 @@ from mjlab.envs.mdp.actions.actions import (
     JointPositionActionCfg,
 )
 
+from .events import _BETA_RESCALER_ATTR
+
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
@@ -77,6 +79,18 @@ class LowPassJointPositionAction(JointPositionAction):
         limits = self._entity.data.soft_joint_pos_limits[:, self._target_ids]
         return torch.clamp(target, limits[..., 0], limits[..., 1])
 
+    def _read_beta(self) -> torch.Tensor | float:
+        """Per-env action-rescaler beta as [B, 1] (broadcasts over joints).
+
+        Published by BetaRescalerCurriculum (anneals 1.0 -> 0.25 on success).
+        Falls back to a scalar 1.0 when the curriculum is disabled / not yet
+        initialised, recovering the plain residual-on-default scheme.
+        """
+        beta = getattr(self._env, _BETA_RESCALER_ATTR, None)
+        if beta is None:
+            return 1.0
+        return beta.unsqueeze(-1)  # [B, 1]
+
     def _set_if_present(
         self,
         obj: object,
@@ -120,9 +134,18 @@ class LowPassJointPositionAction(JointPositionAction):
         self._clipped_raw_actions = torch.clamp(actions, -1.0, 1.0)
 
         # super() sets _processed_actions = scale * action + default (the desired target).
+        # With cfg.scale = 1.0 (set per-robot for HoST) the residual is just the
+        # clipped action a, so applying the per-env rescaler beta gives the HoST
+        # PD target  p^d = q_default + beta * a  (beta anneals 1.0 -> 0.25). When the
+        # beta curriculum is disabled, _read_beta() returns 1.0 and this reduces to
+        # the plain residual-on-default target.
         super().process_actions(self._clipped_raw_actions)
+        beta = self._read_beta()
+        desired_target = self._default_target + beta * (
+            self._processed_actions - self._default_target
+        )
         ema_target = (
-            self._alpha * self._processed_actions
+            self._alpha * desired_target
             + (1.0 - self._alpha) * self._filtered_target
         )
         self._filtered_target_unclamped = ema_target

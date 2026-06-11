@@ -24,7 +24,9 @@ import src.tasks.getup.mdp as mdp
 
 _ACTOR_INCLUDE_BODY_HEIGHT = False
 _ACTOR_INCLUDE_FEET_CONTACT = False
-_ACTOR_INCLUDE_IMU_LIN_ACC = True
+# HoST's deployable state vector does NOT include the accelerometer; it is kept on
+# the CRITIC only (clean ground truth, see _get_privileged_critic_obs_terms).
+_ACTOR_INCLUDE_IMU_LIN_ACC = False
 
 # --- Pre-normalization clip bounds (protect the empirical normalizer from
 # outliers / sim blow-ups). Applied at the term level, BEFORE the network's
@@ -49,8 +51,14 @@ _HEAD_IMPACT_TERMINATION_THRESHOLD = 1200.0
 
 # Grace window (env-steps) before the velocity / feet-too-high guards arm, so the
 # spawn-drop landing transient during the unactuated/settling phase never trips
-# them. Covers the G1 settle (10) + assist-unactuated (15) windows with margin.
-_GRACE_STEPS = 15
+# them. Covers the G1 settle (5) + assist-unactuated (8) windows with margin.
+# Halved 15->8 for the HoST 50 Hz control rate (step_dt 0.01 s -> 0.02 s) so the
+# real-time grace window (~0.15 s) is preserved.
+_GRACE_STEPS = 8
+
+# HoST unactuated_time: the DOF-velocity / base-velocity guards arm only AFTER this
+# window (30 steps = 0.6 s @ 50 Hz, matching g1_config_ground.py unactuated_timesteps=30).
+_UNACTUATED_STEPS = 30
 
 _FORBIDDEN_ACTOR_TERMS = {
     "base_height",
@@ -75,8 +83,10 @@ def _get_actor_obs_terms() -> dict[str, ObservationTermCfg]:
             noise=Unoise(n_min=-0.2, n_max=0.2),
             clip=(-_CLIP_ANG_VEL, _CLIP_ANG_VEL),
         ),
-        "projected_gravity": ObservationTermCfg(
-            func=mdp.projected_gravity,
+        # HoST state uses base ROLL and PITCH as two scalars (r_t, q_t), not the
+        # full projected-gravity vector. noise ±0.05 (HoST roll/pitch noise).
+        "base_roll_pitch": ObservationTermCfg(
+            func=mdp.base_roll_pitch,
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
         "joint_pos": ObservationTermCfg(
@@ -89,11 +99,11 @@ def _get_actor_obs_terms() -> dict[str, ObservationTermCfg]:
             clip=(-_CLIP_JOINT_VEL, _CLIP_JOINT_VEL),
         ),
         "last_action": ObservationTermCfg(func=mdp.last_action),
-        "pd_tracking_error": ObservationTermCfg(
-            func=mdp.pd_tracking_error,
-            params={"action_name": "joint_pos"},
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-            clip=(-_CLIP_PD_ERR, _CLIP_PD_ERR),
+        # HoST action-rescaler beta (curriculum-annealed action scale), observed by
+        # the policy so it adapts as its authority shrinks. noise ±0.025 (HoST).
+        "beta_rescaler": ObservationTermCfg(
+            func=mdp.beta_rescaler,
+            noise=Unoise(n_min=-0.025, n_max=0.025),
         ),
     }
 
@@ -145,6 +155,21 @@ def _get_actor_obs_terms() -> dict[str, ObservationTermCfg]:
 
 def _get_privileged_critic_obs_terms() -> dict[str, ObservationTermCfg]:
     return {
+        # HoST's actor state was trimmed to roll+pitch and dropped pd_tracking_error
+        # / imu_lin_acc to stay deployable. The CRITIC is never deployed, so it keeps
+        # the richer signal: the full projected-gravity vector, the PD tracking error,
+        # and the CLEAN ground-truth accelerometer. (imu_lin_acc here is already the
+        # clean func; the override in _get_critic_obs_terms is a harmless no-op now.)
+        "projected_gravity": ObservationTermCfg(func=mdp.projected_gravity),
+        "pd_tracking_error": ObservationTermCfg(
+            func=mdp.pd_tracking_error,
+            params={"action_name": "joint_pos"},
+            clip=(-_CLIP_PD_ERR, _CLIP_PD_ERR),
+        ),
+        "imu_lin_acc": ObservationTermCfg(
+            func=mdp.imu_lin_acc,
+            clip=(-_CLIP_IMU_ACC, _CLIP_IMU_ACC),
+        ),
         # Applied (post-EMA, post-settle) PD position target actually commanded.
         # Combined with the actor's raw `last_action` and measured `joint_pos`,
         # this lets the critic reconstruct the full raw→filter→joint command chain
@@ -307,9 +332,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             terms=actor_terms,
             concatenate_terms=True,
             enable_corruption=True,
-            # Get-up contact transitions are partially observable; a short history
-            # gives the policy temporal context (spec: very short history hurts).
-            history_length=4,
+            # HoST stacks the last 5 consecutive states (the ablation's sweet spot:
+            # history=0 fails on hard terrain, 10 slightly degrades smoothness). mjlab's
+            # circular buffer holds the last N frames INCLUDING the current one, so
+            # history_length=5 == "last 5 consecutive states".
+            history_length=5,
             # First massive run: log the term + env ids of any NaN/Inf, then
             # sanitize to 0 (per-term check). Switch to "sanitize" for silent
             # production or "error" for strict debugging once stable.
@@ -584,204 +611,165 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
     ##
 
     rewards = {
-        # MULTIPLICATIVE task reward (HoST-style): upright AND tall, in [0, 1].
-        # Replaces the additive trio base_height_exp + torso_height_exp + body_up_exp,
-        # which the policy farmed by satisfying ONE factor (parking half-propped:
-        # body_up≈0.8) without ever rising. The product up·height is high only when
-        # BOTH are high, so that local optimum is no longer rewarded. Dominant weight.
-        "task_stand": RewardTermCfg(
-            func=mdp.task_stand,
+        # ===================================================================
+        # TASK group (HoST definitive): high-level objectives, weight 1 each.
+        # ===================================================================
+        # Head height: f_tol(h_head, [1, inf), margin=1, value=0.1). h_head uses
+        # torso_link as a proxy (no separate head body); set per-robot (env_cfgs.py).
+        "task_head_height": RewardTermCfg(
+            func=mdp.task_head_height,
+            weight=1.0,
+            params={
+                "lower": 1.0,
+                "margin": 1.0,
+                "value_at_margin": 0.1,
+                "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot (torso_link).
+            },
+        ),
+        # Base orientation: f_tol(-proj_grav_b[z], [0.99, inf), margin=1, value=0.05).
+        "task_base_orientation": RewardTermCfg(
+            func=mdp.task_base_orientation,
+            weight=1.0,
+            params={"lower": 0.99, "margin": 1.0, "value_at_margin": 0.05,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # ===================================================================
+        # STYLE group (HoST definitive): shape the motion. Binary deviation
+        # penalties carry their magnitude in the function; weight=1.0 for those.
+        # ===================================================================
+        "style_waist_yaw_deviation": RewardTermCfg(
+            func=mdp.style_waist_yaw_deviation,
+            weight=1.0,
+            params={"limit": 1.4, "penalty": -10.0,
+                    "asset_cfg": SceneEntityCfg("robot", joint_names=("waist_yaw_joint",))},
+        ),
+        "style_hip_deviation": RewardTermCfg(
+            func=mdp.style_hip_deviation,
+            weight=1.0,
+            params={"roll_limit": 1.4, "yaw_limit": 0.9, "penalty": -10.0,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "style_knee_deviation": RewardTermCfg(
+            func=mdp.style_knee_deviation,
+            weight=1.0,
+            params={"hi_limit": 2.85, "lo_limit": -0.06, "penalty": -0.25,  # Ground value
+                    "asset_cfg": SceneEntityCfg("robot", joint_names=(".*_knee_joint",))},
+        ),
+        "style_shoulder_roll_deviation": RewardTermCfg(
+            func=mdp.style_shoulder_roll_deviation,
+            weight=1.0,
+            params={"left_limit": -0.02, "right_limit": 0.02, "penalty": -2.5,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # CoM-in-support; weight 2.5 per foot (function sums both feet). Active > Stage 2.
+        "style_foot_displacement": RewardTermCfg(
+            func=mdp.style_foot_displacement,
             weight=2.5,
-            params={
-                "target_height": 0.728,  # G1 standing pelvis height
-                "k_up": 4.0,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
+            params={"scale": 2.0, "clip_min": 0.3,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},  # Set per-robot.
         ),
-        "stand_on_feet": RewardTermCfg(
-            func=mdp.stand_on_feet,
+        "style_foot_distance": RewardTermCfg(
+            func=mdp.style_foot_distance,
             weight=1.0,
-            params={
-                "sensor_name": "feet_ground_contact",
-                "foot_height_threshold": 0.1,
-                "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
-            },
+            params={"max_dist_sq": 0.9, "penalty": -10.0,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},  # Set per-robot.
         ),
-        # Final standing posture: soft (exp), group-weighted attraction toward the
-        # HOME standing pose, gated to near-standing (>~0.6m). Replaces the old
-        # dof_error_when_standing, which tracked the SUPINE default pose and thus
-        # pulled the standing posture toward lying down. target_joint_pos and
-        # joint_weights are robot-specific and set per-robot (env_cfgs.py).
-        "standing_posture": RewardTermCfg(
-            func=mdp.standing_posture,
-            weight=0.5,
-            params={
-                "target_joint_pos": {},  # Set per-robot (HOME pose).
-                "joint_weights": {},     # Set per-robot (legs/waist high, arms/wrist low).
-                "pelvis_height_threshold": 0.6,
-                "band": 0.12,
-                "kp": 2.0,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
+        # Shank verticality (f_tol), weight 10; active > Stage 1. knee/foot body names
+        # default to G1 in rewards.py.
+        "style_shank_orientation": RewardTermCfg(
+            func=mdp.style_shank_orientation,
+            weight=10.0,
+            params={"lower": 0.8, "margin": 1.0, "value_at_margin": 0.1,
+                    "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Stage-0 righting, split into two distinct, non-redundant signals:
-        #  - prone_recovery: PROGRESS reward for actively rolling off the face
-        #    (pg_x decreasing). Parking pays ~0; only the act of turning over.
-        "prone_recovery": RewardTermCfg(
-            func=mdp.prone_recovery,
-            weight=0.5,
-            params={
-                "height_threshold": 0.40,
-                "band": 0.10,
-                "max_step": 0.05,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        ),
-        #  - supine_rising_prep: rewards a supine robot for sitting up (torso
-        #    verticalising) and bringing its CoM over the feet — a config useful
-        #    for rising, NOT merely lying on the back. site_names set per-robot.
-        "supine_rising_prep": RewardTermCfg(
-            func=mdp.supine_rising_prep,
-            weight=0.5,
-            params={
-                "height_threshold": 0.40,
-                "band": 0.10,
-                "dist_scale": 3.0,
-                "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
-            },
-        ),
-        # CoM projection reward — MUST be stage-gated (height + upright + foot-contact).
-        # Activates during Stage 1/2 (rising) and stays active during Stage 3.
-        # Zero when the robot is flat on the floor so it never fights Stage-0 righting.
-        # asset_cfg.site_names must be set per-robot (left_foot, right_foot).
-        "com_over_support": RewardTermCfg(
-            func=mdp.com_over_support,
+        # Low trunk angular velocity during the rise (exp), weight 1; active > Stage 1.
+        "style_base_ang_vel": RewardTermCfg(
+            func=mdp.style_base_ang_vel,
             weight=1.0,
-            params={
-                "foot_sensor_name": "feet_ground_contact",
-                "min_height": 0.25,     # gate starts at stage-1 entry
-                "height_band": 0.15,    # fully on at 0.40 m (stage-2)
-                "dist_scale": 5.0,      # exp(-5 * dist²): 0.1m → 0.95, 0.3m → 0.64
-                "upright_lo": 0.3,      # -proj_grav_z lower bound (start ramp)
-                "upright_hi": 0.7,      # -proj_grav_z upper bound (full ramp)
-                "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
-            },
+            params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Dense progress signal: reward upward pelvis movement each step.
-        # Normalised to [0,1] (delta/max_step) so it actually contributes; weight
-        # raised 0.5→1.0. Crucial early when absolute-height rewards are near-zero.
-        "height_progress": RewardTermCfg(
-            func=mdp.height_progress,
-            weight=1.0,
-            params={"max_step": 0.05, "asset_cfg": SceneEntityCfg("robot")},
+        # ===================================================================
+        # REGULARIZATION group (HoST definitive), group weight 0.1: weak shaping
+        # penalties (all 9 terms wired).
+        # ===================================================================
+        "joint_acc_l2": RewardTermCfg(
+            func=mdp.joint_acc_l2, weight=-2.5e-7,
+            params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Reward staying above standing height for 50 consecutive steps (0.5 s).
-        # Prevents the policy from learning to "touch" standing for one frame.
-        "stable_success_hold": RewardTermCfg(
-            func=mdp.stable_success_hold,
-            weight=3.0,
-            params={
-                "n_hold": 50,
-                "height_threshold": 0.65,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-1e-2),
+        # Smoothness = second action difference ||a_t - 2 a_{t-1} + a_{t-2}||².
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-1e-2),
+        "joint_torques_l2": RewardTermCfg(
+            func=mdp.joint_torques_l2, weight=-2.5e-6,
+            params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        # --- Style rewards (stage 1-2: support transition / rising) ---
-        "feet_slip": RewardTermCfg(
-            func=mdp.feet_slip,
-            weight=-0.2,
-            params={
-                "sensor_name": "feet_ground_contact",  # real contact, not height
-                "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
-            },
+        # Mechanical power Σ|τ·q̇|.
+        "joint_power_l2": RewardTermCfg(
+            func=mdp.joint_power_l2, weight=-2.5e-5,
+            params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        "feet_distance": RewardTermCfg(
-            func=mdp.feet_distance,
-            weight=-0.5,
-            params={
-                "min_dist": 0.10,
-                "max_dist": 0.50,
-                "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
-            },
+        "joint_vel_l2": RewardTermCfg(
+            func=mdp.joint_vel_l2, weight=-1e-4,
+            params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Head usage should be discouraged at all times, but only violent impacts
-        # should dominate the return / terminate the episode.
-        "head_contact_penalty": RewardTermCfg(
-            func=mdp.head_contact_penalty,
-            weight=-0.5,
-            params={"sensor_name": "contact_head"},
-        ),
-        "head_impact_penalty": RewardTermCfg(
-            func=mdp.head_impact_penalty,
-            weight=-2.0,
-            params={
-                "sensor_name": "contact_head",
-                "force_threshold": _HEAD_IMPACT_PENALTY_THRESHOLD,
-                "force_scale": _HEAD_IMPACT_PENALTY_SCALE,
-            },
-        ),
-        # Penalize commanding targets outside the joint limits (actuator saturation).
-        "action_saturation": RewardTermCfg(
-            func=mdp.action_saturation,
-            weight=-1.0,
+        # Strongest in the group: PD target-vs-measured gap (implicit effort penalty).
+        "joint_tracking_error": RewardTermCfg(
+            func=mdp.joint_tracking_error, weight=-2.5e-1,
             params={"action_name": "joint_pos", "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # --- Regularization (kept weak during discovery; raise for deployability) ---
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.05),
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-5e-3),
-        "joint_vel_l2": RewardTermCfg(
-            func=mdp.joint_vel_l2,
-            weight=-1e-3,
+        # Hard-wall joint position limit penalty (very high coefficient).
+        "joint_pos_limits": RewardTermCfg(
+            func=mdp.joint_pos_limits, weight=-1e2,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        "joint_acc_l2": RewardTermCfg(
-            func=mdp.joint_acc_l2,
-            weight=-2.5e-7,
-            params={"asset_cfg": SceneEntityCfg("robot")},
-        ),
-        "joint_torques_l2": RewardTermCfg(
-            func=mdp.joint_torques_l2,
-            weight=-2e-5,
-            params={"asset_cfg": SceneEntityCfg("robot")},
-        ),
-        # Mechanical power Σ|τ·q̇|: captures energy spent under load that torque
-        # norm alone misses (static holds are cheap, motion under load is not).
-        "joint_power_l2": RewardTermCfg(
-            func=mdp.joint_power_l2,
-            weight=-1e-4,
-            params={"asset_cfg": SceneEntityCfg("robot")},
-        ),
-        # --- Post-task (HoST-style): shape the held standing state, gated to
-        # standing & upright so they never fight the rise. ---
-        "base_ang_vel_penalty": RewardTermCfg(
-            func=mdp.base_ang_vel_penalty,
-            weight=-0.05,
-            params={"height_threshold": 0.65, "asset_cfg": SceneEntityCfg("robot")},
-        ),
-        "base_lin_vel_penalty": RewardTermCfg(
-            func=mdp.base_lin_vel_penalty,
-            weight=-0.1,
-            params={"height_threshold": 0.65, "asset_cfg": SceneEntityCfg("robot")},
-        ),
-        "standing_balance_hold": RewardTermCfg(
-            func=mdp.standing_balance_hold,
-            weight=1.0,
+        # Joint velocity limits: Σ clamp(|q̇| - limit, 0). weight -1.0 = HoST's
+        # "-Σ[...] with weight 1" (penalty: the function returns the violation amount).
+        "joint_vel_limits": RewardTermCfg(
+            func=mdp.joint_vel_limits,
+            weight=-1.0,
             params={
-                "target_height": 0.728,
-                "height_threshold": 0.65,
-                "k_height": 10.0,
+                "vel_limits": {  # G1 actuator velocity limits [rad/s]
+                    ".*_hip_pitch_joint": 32.0, ".*_hip_yaw_joint": 32.0, "waist_yaw_joint": 32.0,
+                    ".*_hip_roll_joint": 20.0, ".*_knee_joint": 20.0,
+                    ".*_wrist_pitch_joint": 22.0, ".*_wrist_yaw_joint": 22.0,
+                    ".*_ankle_pitch_joint": 50.0, ".*_ankle_roll_joint": 50.0,
+                    "waist_roll_joint": 50.0, "waist_pitch_joint": 50.0,
+                    ".*_shoulder_.*": 37.0, ".*_elbow_joint": 37.0, ".*_wrist_roll_joint": 37.0,
+                },
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         ),
-        # Terminal penalty kept SMALL for the first run: get-up fails constantly
-        # early, so a large terminal cost (was -200) dwarfs the dense task rewards
-        # (~+9 max) and can drive a "freeze to avoid terminating" policy. Raise it
-        # once a baseline stands reliably.
-        "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-25.0),
-        "joint_pos_limits": RewardTermCfg(
-            func=mdp.joint_pos_limits,
-            weight=-10.0,
-            params={"asset_cfg": SceneEntityCfg("robot")},
+        # ===================================================================
+        # POST-TASK group (HoST definitive), group weight 1.0: shape the held
+        # standing state. All terms gated by the HARD indicator 1(h_base > H_STAGE2
+        # = 0.65); zero until standing. Weights all 10 except feet_parallel = 2.5.
+        # ===================================================================
+        "post_base_ang_vel": RewardTermCfg(
+            func=mdp.post_base_ang_vel, weight=10.0,
+            params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "post_base_lin_vel": RewardTermCfg(
+            func=mdp.post_base_lin_vel, weight=10.0,
+            params={"scale": 5.0, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "post_base_orientation": RewardTermCfg(
+            func=mdp.post_base_orientation, weight=10.0,
+            params={"scale": 5.0, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Base height target 0.7 m (flat ground); tight Gaussian (-20).
+        "post_base_height": RewardTermCfg(
+            func=mdp.post_base_height, weight=10.0,
+            params={"target_height": 0.7, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Soft (-0.1) default arm/waist posture; target + mask set per-robot (HOME pose).
+        "post_upper_body_posture": RewardTermCfg(
+            func=mdp.post_upper_body_posture, weight=10.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.1,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "post_feet_parallel": RewardTermCfg(
+            func=mdp.post_feet_parallel, weight=2.5,
+            params={"scale": 20.0, "clip_min": 0.02, "asset_cfg": SceneEntityCfg("robot")},
         ),
     }
 
@@ -789,73 +777,37 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
     # Terminations: only timeout — bad_orientation excluded because robot starts lying
     ##
 
+    # HoST ground / ground-prone termination set: timeout + DOF-vel limit + base-vel
+    # limit (both gated after the unactuated window), plus two numerical safety nets
+    # (nan, ground_penetration) that mjlab benefits from. The behavioral guards and
+    # the platform/wall/slope height checks are deliberately NOT included here — those
+    # belong to the other terrains, to be added in the Sim2Real phase.
     terminations = {
         "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
         "nan": TerminationTermCfg(func=mdp.nan_detection),
-        # Safety nets — cannot fire on a healthy fresh episode (robot starts on
-        # the ground at low speed), only on simulation blow-ups.
-        # _GRACE_STEPS suppresses the velocity / feet guards during the unactuated
-        # settling window (~settle + assist-unactuated steps) so the spawn-drop
-        # landing transient never trips them (HoST gates these after unactuated_time).
+        # HoST DOF velocity limit: any |q̇| over limit (≡ max|q̇|>limit), armed only
+        # after the unactuated window so the spawn-drop transient never trips it.
         "joint_vel_explosion": TerminationTermCfg(
             func=mdp.joint_velocity_explosion,
             params={
-                "max_velocity": 50.0,
-                "grace_steps": _GRACE_STEPS,
+                "max_velocity": 300.0,
+                "grace_steps": _UNACTUATED_STEPS,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         ),
-        # HoST base_vel_out: blow-up guard on the floating base speed.
+        # HoST base_vel_out: floating-base speed over limit, armed after the window.
         "base_vel_explosion": TerminationTermCfg(
             func=mdp.base_velocity_out,
             params={
-                "max_velocity": 8.0,
-                "grace_steps": _GRACE_STEPS,
+                "max_velocity": 20.0,
+                "grace_steps": _UNACTUATED_STEPS,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         ),
-        # HoST platform/wall reset: feet waved in the air instead of planted.
-        "feet_too_high": TerminationTermCfg(
-            func=mdp.feet_too_high,
-            params={
-                "max_height": 0.35,
-                "grace_steps": _GRACE_STEPS,
-                "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
-            },
-        ),
+        # Numerical safety net (not in HoST): catch a base sinking through the floor.
         "ground_penetration": TerminationTermCfg(
             func=mdp.root_height_below_minimum,
             params={"minimum_height": -0.3, "asset_cfg": SceneEntityCfg("robot")},
-        ),
-        # Terminate if the robot falls after having stood: avoids wasting episode
-        # time on a robot that succeeded and then collapsed.
-        "standing_fall_timeout": TerminationTermCfg(
-            func=mdp.standing_fall_timeout,
-            params={
-                "height_threshold": 0.65,
-                "n_fall_steps": 30,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        ),
-        "head_impact": TerminationTermCfg(
-            func=mdp.head_impact_termination,
-            params={
-                "sensor_name": "contact_head",
-                "force_threshold": _HEAD_IMPACT_TERMINATION_THRESHOLD,
-            },
-        ),
-        # End the episode (as a FAILURE → is_terminated penalty) if the robot stops
-        # gaining height for ~2 s. Kills the "roll up half-way and park for 1000
-        # steps farming static height rewards" local optimum, and shortens episodes
-        # so returns/advantages stop flooring the adaptive learning rate.
-        "no_progress_timeout": TerminationTermCfg(
-            func=mdp.no_progress_timeout,
-            params={
-                "min_progress": 0.02,
-                "n_stall_steps": 200,
-                "grace_steps": 50,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
         ),
     }
 
@@ -889,7 +841,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             # nconmax / njmax are sized per-robot in the robot config (env_cfgs.py),
             # because the get-up motion generates many simultaneous contacts.
             mujoco=MujocoCfg(
-                timestep=0.002,  # 500 Hz physics
+                # HoST sim fidelity: 200 Hz PD / physics, policy at 50 Hz
+                # (decimation=4 below). For deployment this switches to 500 Hz PD /
+                # 50 Hz policy (decimation=10). Larger timestep makes the contact
+                # problem stiffer per step, so the solver iterations are kept high
+                # (50 / 30) rather than reduced.
+                timestep=0.005,  # 200 Hz physics
                 # Newton solver convergence. The previous (10 / 20) were aggressive
                 # cuts from the mjlab defaults (100 / 50) made for CPU dev speed.
                 # Get-up is CONTACT-DOMINATED (whole body on the floor) and those
@@ -903,6 +860,6 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                 ls_iterations=30,
             ),
         ),
-        decimation=5,  # control at 100Hz (0.002 * 5 = 0.01s)
+        decimation=4,  # control at 50Hz (0.005 * 4 = 0.02s) — HoST policy rate
         episode_length_s=10.0,
     )

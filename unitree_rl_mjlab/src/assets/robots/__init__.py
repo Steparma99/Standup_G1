@@ -12,6 +12,7 @@ from .unitree_g1.g1_constants import (
     get_g1_prone_robot_cfg,
     get_g1_robot_cfg,
     get_g1_supine_robot_cfg,
+    get_g1_supine_robot_cfg_host,
 )
 
 

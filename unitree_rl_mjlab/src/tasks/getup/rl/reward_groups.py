@@ -25,48 +25,35 @@ GROUP_WEIGHTS: tuple[float, ...] = (2.5, 1.9, 0.1, 1.0)
 # terms exactly once (enforced by build_group_onehot). Terminal penalties
 # (is_terminated, joint_pos_limits) are folded into "task" by default.
 REWARD_GROUP_MAP: dict[str, str] = {
-    # --- TASK: core get-up objective + success + terminal penalties ---------------
-    "task_stand": "task",
-    "stand_on_feet": "task",
-    "standing_posture": "task",
-    "prone_recovery": "task",
-    "supine_rising_prep": "task",
-    "com_over_support": "task",
-    "height_progress": "task",
-    "stable_success_hold": "task",
-    "is_terminated": "task",
-    "joint_pos_limits": "task",
-    # --- STYLE: movement quality / posture shaping during the rise ----------------
-    "feet_slip": "style",
-    "feet_distance": "style",
-    "head_contact_penalty": "style",
-    "head_impact_penalty": "style",
-    "action_saturation": "style",
-    "shank_orientation": "style",
-    "thigh_orientation": "style",
-    "feet_flat": "style",
-    "feet_level": "style",
-    "foot_displacement": "style",
-    "style_ang_vel_xy": "style",
-    "joint_tracking_error": "style",
-    "dof_vel_limits": "style",
-    "waist_deviation": "style",
-    "hip_yaw_deviation": "style",
-    "hip_roll_deviation": "style",
-    "hip_pitch_deviation": "style",
-    "knee_deviation": "style",
-    "shoulder_deviation": "style",
-    # --- REGULARIZATION: smoothness / effort penalties ----------------------------
-    "action_rate_l2": "regularization",
-    "action_acc_l2": "regularization",
-    "joint_vel_l2": "regularization",
+    # --- TASK (HoST definitive): high-level objectives, weight 1 each --------------
+    "task_head_height": "task",
+    "task_base_orientation": "task",
+    # --- STYLE (HoST definitive): motion shaping ----------------------------------
+    "style_waist_yaw_deviation": "style",
+    "style_hip_deviation": "style",
+    "style_knee_deviation": "style",
+    "style_shoulder_roll_deviation": "style",
+    "style_foot_displacement": "style",
+    "style_foot_distance": "style",
+    "style_shank_orientation": "style",
+    "style_base_ang_vel": "style",
+    # --- REGULARIZATION (HoST definitive): weak shaping penalties ------------------
     "joint_acc_l2": "regularization",
+    "action_rate_l2": "regularization",
+    "action_acc_l2": "regularization",  # smoothness (2nd action difference)
     "joint_torques_l2": "regularization",
     "joint_power_l2": "regularization",
-    # --- POST-TASK: hold / stability once standing --------------------------------
-    "base_ang_vel_penalty": "post_task",
-    "base_lin_vel_penalty": "post_task",
-    "standing_balance_hold": "post_task",
+    "joint_vel_l2": "regularization",
+    "joint_tracking_error": "regularization",
+    "joint_pos_limits": "regularization",
+    "joint_vel_limits": "regularization",
+    # --- POST-TASK (HoST definitive): hold the standing state, gated h>H_STAGE2 -----
+    "post_base_ang_vel": "post_task",
+    "post_base_lin_vel": "post_task",
+    "post_base_orientation": "post_task",
+    "post_base_height": "post_task",
+    "post_upper_body_posture": "post_task",
+    "post_feet_parallel": "post_task",
 }
 
 

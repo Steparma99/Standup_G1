@@ -193,6 +193,58 @@ G1_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
   armature=ACTUATOR_5020.reflected_inertia * 2,
 )
 
+# ---------------------------------------------------------------------------
+# HoST get-up PD override.
+#
+# HoST sets hip Kp=200 and knee Kp=275 (compensating the sim-to-real torque gap
+# observed in joint phase plots); all other joints keep their armature-derived
+# stiffness, and damping (Kd) is unchanged everywhere. The baseline groups above
+# mix joint *function* with motor *type* — the 7520-14 group is hip_pitch +
+# hip_yaw + waist_yaw, and the 7520-22 group is hip_roll + knee — so we cannot
+# just bump a group's stiffness without dragging waist_yaw to 200 or hip_roll to
+# 275. We therefore SPLIT those two groups by function below: each sub-group keeps
+# its own motor's armature / effort_limit / damping (those are physical, per
+# motor) but takes the HoST stiffness. These are used ONLY by
+# get_g1_supine_robot_cfg_host() via G1_ARTICULATION_HOST; the shared
+# G1_ARTICULATION / G1_ACTION_SCALE are left untouched, so the velocity task and
+# every other G1 task keep their original gains.
+# ---------------------------------------------------------------------------
+HOST_HIP_KP = 200.0
+HOST_KNEE_KP = 275.0
+
+# Hip pitch + hip yaw (7520-14 motor) — HoST Kp=200.
+G1_ACTUATOR_HOST_HIP_PITCH_YAW = BuiltinPositionActuatorCfg(
+  target_names_expr=(".*_hip_pitch_joint", ".*_hip_yaw_joint"),
+  stiffness=HOST_HIP_KP,
+  damping=DAMPING_7520_14,
+  effort_limit=ACTUATOR_7520_14.effort_limit,
+  armature=ACTUATOR_7520_14.reflected_inertia,
+)
+# Waist yaw (7520-14 motor) — UNCHANGED (armature-derived stiffness).
+G1_ACTUATOR_HOST_WAIST_YAW = BuiltinPositionActuatorCfg(
+  target_names_expr=("waist_yaw_joint",),
+  stiffness=STIFFNESS_7520_14,
+  damping=DAMPING_7520_14,
+  effort_limit=ACTUATOR_7520_14.effort_limit,
+  armature=ACTUATOR_7520_14.reflected_inertia,
+)
+# Hip roll (7520-22 motor) — HoST Kp=200.
+G1_ACTUATOR_HOST_HIP_ROLL = BuiltinPositionActuatorCfg(
+  target_names_expr=(".*_hip_roll_joint",),
+  stiffness=HOST_HIP_KP,
+  damping=DAMPING_7520_22,
+  effort_limit=ACTUATOR_7520_22.effort_limit,
+  armature=ACTUATOR_7520_22.reflected_inertia,
+)
+# Knee (7520-22 motor) — HoST Kp=275.
+G1_ACTUATOR_HOST_KNEE = BuiltinPositionActuatorCfg(
+  target_names_expr=(".*_knee_joint",),
+  stiffness=HOST_KNEE_KP,
+  damping=DAMPING_7520_22,
+  effort_limit=ACTUATOR_7520_22.effort_limit,
+  armature=ACTUATOR_7520_22.reflected_inertia,
+)
+
 ##
 # Keyframe config.
 ##
@@ -420,6 +472,23 @@ G1_ARTICULATION = EntityArticulationInfoCfg(
   soft_joint_pos_limit_factor=0.9,
 )
 
+# HoST get-up articulation: same motors as G1_ARTICULATION but with the 7520-14
+# and 7520-22 groups split by function so hip Kp=200 and knee Kp=275 (see the
+# HoST PD override block above). Covers all 29 DOF exactly once.
+G1_ARTICULATION_HOST = EntityArticulationInfoCfg(
+  actuators=(
+    G1_ACTUATOR_5020,
+    G1_ACTUATOR_HOST_HIP_PITCH_YAW,
+    G1_ACTUATOR_HOST_WAIST_YAW,
+    G1_ACTUATOR_HOST_HIP_ROLL,
+    G1_ACTUATOR_HOST_KNEE,
+    G1_ACTUATOR_4010,
+    G1_ACTUATOR_WAIST,
+    G1_ACTUATOR_ANKLE,
+  ),
+  soft_joint_pos_limit_factor=0.9,
+)
+
 
 def get_g1_robot_cfg() -> EntityCfg:
   """Get a fresh G1 robot configuration instance.
@@ -442,6 +511,21 @@ def get_g1_supine_robot_cfg() -> EntityCfg:
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
     articulation=G1_ARTICULATION,
+  )
+
+
+def get_g1_supine_robot_cfg_host() -> EntityCfg:
+  """G1 supine config with HoST get-up PD gains (hip Kp=200, knee Kp=275).
+
+  Identical to get_g1_supine_robot_cfg() except it uses G1_ARTICULATION_HOST, so
+  only the get-up task picks up the HoST stiffness override. All other joints keep
+  their armature-derived stiffness and damping (Kd) is unchanged everywhere.
+  """
+  return EntityCfg(
+    init_state=SUPINE_KEYFRAME,
+    collisions=(FULL_COLLISION,),
+    spec_fn=get_spec,
+    articulation=G1_ARTICULATION_HOST,
   )
 
 

@@ -38,6 +38,8 @@ class MultiCriticPPO(PPO):
         *,
         env: VecEnv,
         reward_group_weights,
+        l2c2_actor_coef: float = 1.0,
+        l2c2_critic_coef: float = 0.1,
         **kwargs,
     ) -> None:
         super().__init__(actor, critic, storage, **kwargs)
@@ -46,6 +48,9 @@ class MultiCriticPPO(PPO):
         self.reward_group_weights = torch.as_tensor(
             reward_group_weights, dtype=torch.float32, device=self.device
         )
+        # L2C2 smoothness weights: lambda_actor on the policy, lambda_critic on EACH critic.
+        self.l2c2_actor_coef = l2c2_actor_coef
+        self.l2c2_critic_coef = l2c2_critic_coef
         # Lazily built on the first env step from RewardManager.active_terms.
         self._group_onehot: torch.Tensor | None = None
 
@@ -119,6 +124,15 @@ class MultiCriticPPO(PPO):
         w = self.reward_group_weights.view(1, 1, -1)
         st.advantages = (adv_norm * w).sum(dim=-1, keepdim=True)
 
+        # Record s_{t+1} for each transition (consumed by the L2C2 smoothness term).
+        st.fill_next_observations(obs)
+
+    @staticmethod
+    def _interpolate_obs(s: TensorDict, s_next: TensorDict, u: torch.Tensor) -> TensorDict:
+        """Per-sample linear interpolation s_tilde = s + (s_next - s) * u over all groups."""
+        interpolated = {key: s[key] + (s_next[key] - s[key]) * u for key in s.keys()}
+        return TensorDict(interpolated, batch_size=s.batch_size, device=s.device)
+
     # ------------------------------------------------------------------ update
     def update(self) -> dict[str, float]:
         """PPO update. Surrogate is unchanged; value loss is summed over the G critics."""
@@ -129,6 +143,8 @@ class MultiCriticPPO(PPO):
         mean_surrogate_loss = 0.0
         mean_entropy = 0.0
         mean_group_value_losses = torch.zeros(self.num_groups, device=self.device)
+        mean_l2c2_actor = 0.0
+        mean_l2c2_critic = torch.zeros(self.num_groups, device=self.device)
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
@@ -150,6 +166,8 @@ class MultiCriticPPO(PPO):
             values = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])  # [B, G]
             distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
             entropy = self.actor.output_entropy[:original_batch_size]
+            # Mean action at s_t (captured before any further actor forward pass), for L2C2.
+            actor_mean = self.actor.output_mean[:original_batch_size]
 
             # Adaptive learning rate from KL divergence.
             if self.desired_kl is not None and self.schedule == "adaptive":
@@ -189,7 +207,29 @@ class MultiCriticPPO(PPO):
             group_value_losses = per_group.mean(dim=0)  # [G]
             value_loss = group_value_losses.sum()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+            # --- L2C2 smoothness regularization (additive, every update) -------------
+            # Interpolate between consecutive states s_t and s_{t+1} with a per-sample
+            # u ~ U(0,1), then penalize the L2 change in the actor mean and each critic
+            # value. Transitions across episode resets (done=True) are masked out.
+            u = torch.rand(original_batch_size, 1, device=self.device)
+            obs_tilde = self._interpolate_obs(batch.observations, batch.next_observations, u)
+            actor_mean_tilde = self.actor(obs_tilde)  # deterministic mean at s_tilde, [B, A]
+            values_tilde = self.critic(obs_tilde)     # [B, G]
+
+            mask = (1.0 - batch.dones.float())        # [B, 1], 0 across resets
+            denom = mask.sum().clamp(min=1.0)
+            l2c2_actor = ((actor_mean - actor_mean_tilde).pow(2).sum(dim=-1, keepdim=True) * mask).sum() / denom
+            l2c2_critic_per_group = ((values - values_tilde).pow(2) * mask).sum(dim=0) / denom  # [G]
+            smoothness_loss = (
+                self.l2c2_actor_coef * l2c2_actor + self.l2c2_critic_coef * l2c2_critic_per_group.sum()
+            )
+
+            loss = (
+                surrogate_loss
+                + self.value_loss_coef * value_loss
+                - self.entropy_coef * entropy.mean()
+                + smoothness_loss
+            )
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -203,12 +243,16 @@ class MultiCriticPPO(PPO):
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
             mean_group_value_losses += group_value_losses.detach()
+            mean_l2c2_actor += l2c2_actor.item()
+            mean_l2c2_critic += l2c2_critic_per_group.detach()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_entropy /= num_updates
         mean_group_value_losses /= num_updates
+        mean_l2c2_actor /= num_updates
+        mean_l2c2_critic /= num_updates
 
         self.storage.clear()
 
@@ -216,9 +260,11 @@ class MultiCriticPPO(PPO):
             "value": mean_value_loss,
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
+            "l2c2_actor": mean_l2c2_actor,
         }
         for i, name in enumerate(GROUP_ORDER):
             loss_dict[f"value_{name}"] = mean_group_value_losses[i].item()
+            loss_dict[f"l2c2_{name}"] = mean_l2c2_critic[i].item()
         return loss_dict
 
     # ------------------------------------------------------------- construction

@@ -37,6 +37,10 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         # (Task 2.5 / Style 1.9 / Regularization 0.1 / Post-task 1.0).
         algorithm=MultiCriticPpoAlgorithmCfg(
             reward_group_weights=(2.5, 1.9, 0.1, 1.0),
+            # L2C2 smoothness: Lipschitz-continuity penalty on the actor and each critic,
+            # added to the loss every update (lambda_actor=1.0, lambda_critic=0.1 per critic).
+            l2c2_actor_coef=1.0,
+            l2c2_critic_coef=0.1,
             value_loss_coef=1.0,
             # Plain per-group MSE value loss (no value clipping): the multi-critic
             # objective sums L(phi_i) = ||return_i - V_i||^2 over the 4 group critics.

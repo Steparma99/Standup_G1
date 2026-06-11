@@ -287,38 +287,23 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Viewer follows torso.
     cfg.viewer.body_name = "torso_link"
 
-    # Wire up reward params that need robot-specific body/site names.
-    # task_stand uses the head/torso height (HoST-style head_height), so it needs the
-    # torso body wired like the old torso_height_exp did.
-    cfg.rewards["task_stand"].params["asset_cfg"].body_names = ("torso_link",)
-    cfg.rewards["stand_on_feet"].params["asset_cfg"].site_names = site_names
-    cfg.rewards["feet_slip"].params["asset_cfg"].site_names = site_names
-    cfg.rewards["feet_distance"].params["asset_cfg"].site_names = site_names
-    cfg.rewards["com_over_support"].params["asset_cfg"].site_names = site_names
-    cfg.rewards["supine_rising_prep"].params["asset_cfg"].site_names = site_names
-    cfg.rewards["foot_displacement"].params["asset_cfg"].site_names = site_names
-    cfg.terminations["feet_too_high"].params["asset_cfg"].site_names = site_names
+    # Wire up reward params that need robot-specific body/site names (HoST reward set).
+    # Head-height task uses torso_link as the head-height proxy (no separate head body).
+    cfg.rewards["task_head_height"].params["asset_cfg"].body_names = ("torso_link",)
+    cfg.rewards["style_foot_displacement"].params["asset_cfg"].site_names = site_names
+    cfg.rewards["style_foot_distance"].params["asset_cfg"].site_names = site_names
 
-    # standing_posture target = HOME standing pose, with per-group joint weights:
-    # legs / waist / ankles HIGH (stance-critical), arms MEDIUM, wrists LOW
-    # (the distal "hand" joints — keep their influence small).
-    cfg.rewards["standing_posture"].params["target_joint_pos"] = dict(
+    # Post-task upper-body posture: target = HOME standing pose, masked to the
+    # upper-body joints (arms + waist); legs/ankles get weight 0 (default).
+    cfg.rewards["post_upper_body_posture"].params["target_joint_pos"] = dict(
         HOME_KEYFRAME.joint_pos
     )
-    cfg.rewards["standing_posture"].params["joint_weights"] = {
-        ".*_hip_.*": 1.0,
-        ".*_knee_joint": 1.0,
-        ".*_ankle_.*": 1.0,
+    cfg.rewards["post_upper_body_posture"].params["joint_weights"] = {
+        ".*_shoulder_.*": 1.0,
+        ".*_elbow_joint": 1.0,
+        ".*_wrist_.*": 1.0,
         "waist_.*": 1.0,
-        ".*_shoulder_.*": 0.3,
-        ".*_elbow_joint": 0.3,
-        ".*_wrist_.*": 0.1,
     }
-
-    # Reward masking: fade in the head impact penalties over the first _MASK_STEPS
-    # steps so the spawn-landing contact during the settling window is not penalized.
-    cfg.rewards["head_contact_penalty"].params["ramp_steps"] = _MASK_STEPS
-    cfg.rewards["head_impact_penalty"].params["ramp_steps"] = _MASK_STEPS
 
     # Domain randomization: mass offset on torso, friction on feet.
     cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
