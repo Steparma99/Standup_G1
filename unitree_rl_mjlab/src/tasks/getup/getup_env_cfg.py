@@ -358,6 +358,13 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
     ##
 
     metrics = {
+        # --- Per-group reward sums (multi-critic groups): the raw reward each
+        # critic sees, before per-group normalization + the group weights. Read
+        # task (positive) vs regularization (negative) separately on one panel. ---
+        "reward_group/task": MetricsTermCfg(func=mdp.reward_group_task),
+        "reward_group/style": MetricsTermCfg(func=mdp.reward_group_style),
+        "reward_group/regularization": MetricsTermCfg(func=mdp.reward_group_regularization),
+        "reward_group/post_task": MetricsTermCfg(func=mdp.reward_group_post_task),
         # --- Legacy ---
         "mean_action_acc": MetricsTermCfg(func=mdp.mean_action_acc),
         # --- P1.2: Stage occupancy ---

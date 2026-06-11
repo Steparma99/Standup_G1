@@ -598,3 +598,45 @@ def contact_impact(
 ) -> torch.Tensor:
     """Binary metric for contacts whose force exceeds a threshold [B,]."""
     return (contact_force_max(env, sensor_name) > force_threshold).float()
+
+
+# ---------------------------------------------------------------------------
+# Per-group reward sums (the four multi-critic groups). Each returns its group's
+# summed reward RATE; the MetricsManager episode-averages it, so the logged
+# Episode_Metrics/reward_group/<g> equals the SUM of that group's per-term
+# Episode_Reward entries — i.e. the raw reward each critic sees BEFORE per-group
+# normalization and the (2.5/1.9/0.1/1.0) group weights. Lets you read the task
+# (positive) vs regularization (negative) signals separately on one panel.
+# ---------------------------------------------------------------------------
+
+_GROUP_ONEHOT_ATTR = "_metric_group_onehot"
+
+
+def _grouped_step_reward(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """[B, G] per-group summed reward rate; columns follow reward_groups.GROUP_ORDER."""
+    rm = env.reward_manager
+    onehot = getattr(env, _GROUP_ONEHOT_ATTR, None)
+    if onehot is None:
+        # Deferred import: avoids triggering the rl package at mdp-import time.
+        from src.tasks.getup.rl.reward_groups import build_group_onehot
+
+        onehot = build_group_onehot(list(rm.active_terms), device=env.device)
+        setattr(env, _GROUP_ONEHOT_ATTR, onehot)
+    return rm._step_reward @ onehot  # [B, num_terms] @ [num_terms, G] -> [B, G]
+
+
+# Column order matches reward_groups.GROUP_ORDER = (task, style, regularization, post_task).
+def reward_group_task(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _grouped_step_reward(env)[:, 0]
+
+
+def reward_group_style(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _grouped_step_reward(env)[:, 1]
+
+
+def reward_group_regularization(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _grouped_step_reward(env)[:, 2]
+
+
+def reward_group_post_task(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    return _grouped_step_reward(env)[:, 3]

@@ -39,8 +39,10 @@ _ASSIST_INITIAL_FORCE_N        = 120.0   # ~30% of G1 weight (~400 N); gentle li
 _ASSIST_FORCE_DECAY_PER_SUCCESS = 5.0    # N removed per successful episode (per env)
 _ASSIST_FORCE_MIN              = 0.0     # fully unassisted floor
 _ASSIST_SUCCESS_HEIGHT         = 0.65    # pelvis height counting as "stood" (task threshold)
-_ASSIST_UNACTUATED_STEPS       = 8       # initial settle steps with no assist force
-                                         # (8 @ 50 Hz ≈ 0.15 s; was 15 @ 100 Hz)
+_ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated/settle
+                                         # window (HoST gates pull_force by
+                                         # real_episode_length_buf > unactuated_time=30,
+                                         # i.e. 30 steps = 0.6 s @ 50 Hz). Matches _SETTLE_STEPS.
 
 # ---------------------------------------------------------------------------
 # Action-rescaler (beta) curriculum (HoST). beta is the action scale in
@@ -77,9 +79,15 @@ _BETA_SUCCESS_HEAD_HEIGHT = 1.0    # torso_link (head proxy) height counting as 
 # step_dt = 0.01 s, so 10 steps = 0.1 s.
 # ---------------------------------------------------------------------------
 _RESET_FALL_HEIGHT = 0.03
-# Halved for the HoST 50 Hz control rate (step_dt 0.02 s) so the real-time
-# settle (~0.1 s) and impact-mask (~0.2 s) windows match the old 100 Hz values.
-_SETTLE_STEPS = 5
+# Unactuated/settle window = HoST's unactuated_time (30 steps = 0.6 s @ 50 Hz). The
+# policy does NOT control for these 30 steps: the PD holds the CURRENT pose (a passive
+# limp-settle) so MuJoCo fully resolves spawn contacts / interpenetration before the
+# policy takes over, and the assist force is suppressed over the same window. (We keep
+# the gentle 3 cm spawn drop rather than HoST's ~0.4 m drop — a big drop would worsen
+# the very spawn-instability this window is meant to absorb. We also keep hold-current
+# instead of HoST's zero-action, because here zero action targets default_joint_pos,
+# which is far from the supine spawn and would yank the robot up instead of settling.)
+_SETTLE_STEPS = 30
 _MASK_STEPS = 10
 
 
