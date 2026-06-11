@@ -3,15 +3,19 @@
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
-    RslRlPpoAlgorithmCfg,
 )
+
+from src.tasks.getup.rl.cfg import MultiCriticPpoAlgorithmCfg
 
 
 def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     """Create RL runner configuration for Unitree G1 get-up task."""
     return RslRlOnPolicyRunnerCfg(
+        # HoST-style actor: 3-layer MLP [512, 256, 128], ELU, stacked obs history (n=5,
+        # set on the actor obs group in getup_env_cfg.py). Gaussian policy with a learned
+        # scalar std at train time; deterministic mean at deploy.
         actor=RslRlModelCfg(
-            hidden_dims=(768, 384, 192),
+            hidden_dims=(512, 256, 128),
             activation="elu",
             obs_normalization=True,
             distribution_cfg={
@@ -20,12 +24,19 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
                 "std_type": "scalar",
             },
         ),
+        # HoST-style critic: this config is applied to EACH of the 4 group critics
+        # (Task / Style / Regularization / Post-task). Each is a 2-layer MLP [512, 256]
+        # outputting a scalar value for its reward group. Critics see the privileged
+        # critic obs and are free at deployment (only the actor is exported to ONNX).
         critic=RslRlModelCfg(
-            hidden_dims=(768, 384, 192),
+            hidden_dims=(512, 256),
             activation="elu",
             obs_normalization=True,
         ),
-        algorithm=RslRlPpoAlgorithmCfg(
+        # Multi-critic PPO: per-group advantages combined with reward_group_weights
+        # (Task 2.5 / Style 1.9 / Regularization 0.1 / Post-task 1.0).
+        algorithm=MultiCriticPpoAlgorithmCfg(
+            reward_group_weights=(2.5, 1.9, 0.1, 1.0),
             value_loss_coef=1.0,
             use_clipped_value_loss=True,
             clip_param=0.2,
