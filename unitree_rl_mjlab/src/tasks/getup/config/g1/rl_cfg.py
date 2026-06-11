@@ -38,14 +38,13 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         algorithm=MultiCriticPpoAlgorithmCfg(
             reward_group_weights=(2.5, 1.9, 0.1, 1.0),
             value_loss_coef=1.0,
-            use_clipped_value_loss=True,
+            # Plain per-group MSE value loss (no value clipping): the multi-critic
+            # objective sums L(phi_i) = ||return_i - V_i||^2 over the 4 group critics.
+            use_clipped_value_loss=False,
             clip_param=0.2,
-            # Raised 0.008→0.015: entropy collapsed to ~0.3 within ~1k iters last run
-            # (premature convergence to the lie-still local optimum). Keep exploration
-            # alive longer so the policy actually tries to rise.
-            entropy_coef=0.015,
+            entropy_coef=0.01,
             num_learning_epochs=5,
-            num_mini_batches=8,
+            num_mini_batches=4,
             learning_rate=5.0e-4,
             schedule="adaptive",
             gamma=0.99,
@@ -64,6 +63,6 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         logger="wandb",
         wandb_project="g1_getup",
         save_interval=100,
-        num_steps_per_env=64,
+        num_steps_per_env=50,
         max_iterations=12000,
     )

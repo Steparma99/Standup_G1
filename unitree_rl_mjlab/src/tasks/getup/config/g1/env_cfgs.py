@@ -3,14 +3,14 @@
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from src.tasks.getup.mdp.actions import LowPassJointPositionActionCfg
-from src.tasks.getup.mdp.events import AssistanceCurriculum
+from src.tasks.getup.mdp.events import AssistanceCurriculum, BetaRescalerCurriculum
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 import src.tasks.getup.mdp as mdp
 
-from src.assets.robots import G1_ACTION_SCALE, get_g1_supine_robot_cfg
+from src.assets.robots import get_g1_supine_robot_cfg_host
 from src.assets.robots.unitree_g1.g1_constants import (
     HOME_KEYFRAME,
     PRONE_KEYFRAME,
@@ -39,7 +39,23 @@ _ASSIST_INITIAL_FORCE_N        = 120.0   # ~30% of G1 weight (~400 N); gentle li
 _ASSIST_FORCE_DECAY_PER_SUCCESS = 5.0    # N removed per successful episode (per env)
 _ASSIST_FORCE_MIN              = 0.0     # fully unassisted floor
 _ASSIST_SUCCESS_HEIGHT         = 0.65    # pelvis height counting as "stood" (task threshold)
-_ASSIST_UNACTUATED_STEPS       = 15      # initial settle steps with no assist force
+_ASSIST_UNACTUATED_STEPS       = 8       # initial settle steps with no assist force
+                                         # (8 @ 50 Hz ≈ 0.15 s; was 15 @ 100 Hz)
+
+# ---------------------------------------------------------------------------
+# Action-rescaler (beta) curriculum (HoST). beta is the action scale in
+# p^d = q_default + beta * a. It starts at 1.0 (large authority while the policy
+# explores on the floor) and is decremented by 0.02 every time an env's episode
+# ends with head height >= _BETA_SUCCESS_HEAD_HEIGHT, down to a 0.25 floor (the
+# exact value HoST's no-curriculum ablation uses). Per-env, success-driven — the
+# SAME mechanism as the vertical assist force — so it is invariant to env count /
+# episode length. The policy observes its beta (beta_rescaler obs term).
+# ---------------------------------------------------------------------------
+_BETA_CURRICULUM_ENABLE   = True
+_BETA_INITIAL             = 1.0
+_BETA_DECREMENT           = 0.02   # removed per successful episode (per env)
+_BETA_MIN                 = 0.25   # floor (HoST fixed-beta ablation value)
+_BETA_SUCCESS_HEAD_HEIGHT = 1.0    # torso_link (head proxy) height counting as "stood up"
 
 # ---------------------------------------------------------------------------
 # Reset drop + settling phase.
@@ -61,8 +77,10 @@ _ASSIST_UNACTUATED_STEPS       = 15      # initial settle steps with no assist f
 # step_dt = 0.01 s, so 10 steps = 0.1 s.
 # ---------------------------------------------------------------------------
 _RESET_FALL_HEIGHT = 0.03
-_SETTLE_STEPS = 10
-_MASK_STEPS = 20
+# Halved for the HoST 50 Hz control rate (step_dt 0.02 s) so the real-time
+# settle (~0.1 s) and impact-mask (~0.2 s) windows match the old 100 Hz values.
+_SETTLE_STEPS = 5
+_MASK_STEPS = 10
 
 
 def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -80,8 +98,9 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.sim.njmax = 600
 
     # Robot spawns from SUPINE by default; the reset event below overrides the
-    # pose every episode by sampling from the reference set.
-    cfg.scene.entities = {"robot": get_g1_supine_robot_cfg()}
+    # pose every episode by sampling from the reference set. Uses the HoST PD
+    # variant (hip Kp=200, knee Kp=275; all other gains/damping unchanged).
+    cfg.scene.entities = {"robot": get_g1_supine_robot_cfg_host()}
 
     # Reference poses for the multi-pose randomized reset. Add more poses here as
     # they are validated. To test a SINGLE fixed pose first, set this to
@@ -253,10 +272,14 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         contact_hand_right_cfg,
     )
 
-    # Set per-robot action scale.
+    # HoST action scaling: p^d = q_default + beta * a, with a single scalar action
+    # scale of 1.0 (the per-env beta curriculum supplies the actual rescaling,
+    # 1.0 -> 0.25). This REPLACES the previous per-joint G1_ACTION_SCALE
+    # (0.25*effort/stiffness); with beta=1.0 the residual is up to ±1 rad/joint, so
+    # actions are more aggressive early and anneal down as each env succeeds.
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, LowPassJointPositionActionCfg)
-    joint_pos_action.scale = G1_ACTION_SCALE
+    joint_pos_action.scale = 1.0
     # Settling phase: hold the policy for the first _SETTLE_STEPS steps so the robot
     # accommodates onto the floor before it takes control.
     joint_pos_action.settle_steps = _SETTLE_STEPS
@@ -265,13 +288,15 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.viewer.body_name = "torso_link"
 
     # Wire up reward params that need robot-specific body/site names.
-    # (torso_height_exp removed: height/uprightness now live in the multiplicative
-    # task_stand reward, which uses the pelvis root — no per-robot body needed.)
+    # task_stand uses the head/torso height (HoST-style head_height), so it needs the
+    # torso body wired like the old torso_height_exp did.
+    cfg.rewards["task_stand"].params["asset_cfg"].body_names = ("torso_link",)
     cfg.rewards["stand_on_feet"].params["asset_cfg"].site_names = site_names
     cfg.rewards["feet_slip"].params["asset_cfg"].site_names = site_names
     cfg.rewards["feet_distance"].params["asset_cfg"].site_names = site_names
     cfg.rewards["com_over_support"].params["asset_cfg"].site_names = site_names
     cfg.rewards["supine_rising_prep"].params["asset_cfg"].site_names = site_names
+    cfg.rewards["foot_displacement"].params["asset_cfg"].site_names = site_names
     cfg.terminations["feet_too_high"].params["asset_cfg"].site_names = site_names
 
     # standing_posture target = HOME standing pose, with per-group joint weights:
@@ -334,6 +359,30 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         )
 
     # ------------------------------------------------------------------
+    # Action-rescaler (beta) curriculum — HoST per-env action-scale annealing.
+    # Class-based step event: __call__ tracks whether the episode reached the
+    # success head height; reset() decrements beta (0.02) for envs that did, down
+    # to the 0.25 floor. The action term and beta_rescaler obs read the live beta;
+    # curriculum/beta_rescaler logs its per-env mean (should fall 1.0 -> 0.25).
+    # ------------------------------------------------------------------
+    if _BETA_CURRICULUM_ENABLE:
+        cfg.events["beta_rescaler_curriculum"] = EventTermCfg(
+            mode="step",
+            func=BetaRescalerCurriculum,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "body_name": "torso_link",
+                "initial_beta": _BETA_INITIAL,
+                "decrement": _BETA_DECREMENT,
+                "beta_min": _BETA_MIN,
+                "success_head_height": _BETA_SUCCESS_HEAD_HEIGHT,
+            },
+        )
+        cfg.metrics["curriculum/beta_rescaler"] = MetricsTermCfg(
+            func=mdp.beta_rescaler_value
+        )
+
+    # ------------------------------------------------------------------
     # P1.4 — Motor strength randomization (scales effort limits per env)
     # Disabled by default; enable by setting _DR_MOTOR_STRENGTH_ENABLE=True
     # above. With range=[1.0,1.0] behaviour is identical to baseline.
@@ -387,6 +436,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             },
         )
 
+    if not play:
+        # Default parallel environments for training. Override on the CLI with
+        # --env.scene.num-envs. (Episode horizon is 500 steps: episode_length_s=10.0
+        # at decimation=4 x 0.005s = 0.02s control period.)
+        cfg.scene.num_envs = 1024
+
     if play:
         cfg.episode_length_s = int(1e9)
         cfg.observations["actor"].enable_corruption = False
@@ -394,6 +449,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # No support force at eval time: show the true, unaided policy.
         cfg.events.pop("assistance_curriculum", None)
         cfg.metrics.pop("curriculum/assistance_force", None)
+        # Pin beta to its converged floor (0.25 — HoST's fixed eval/ablation value)
+        # instead of the training start of 1.0: the curriculum is per-env and does
+        # not persist into a fresh eval env, so without this the policy would be
+        # evaluated at full action authority it never deploys with.
+        if "beta_rescaler_curriculum" in cfg.events:
+            cfg.events["beta_rescaler_curriculum"].params["initial_beta"] = _BETA_MIN
         cfg.curriculum = {}
 
     return cfg
