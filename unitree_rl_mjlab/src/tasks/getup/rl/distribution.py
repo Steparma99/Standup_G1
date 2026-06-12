@@ -1,17 +1,22 @@
 """Custom distribution modules for the get-up task."""
 
 import torch
+import torch.nn as nn
 from torch.distributions import Normal
-from rsl_rl.modules.distribution import GaussianDistribution
+from rsl_rl.modules.distribution import Distribution
 
 
-class ClampedGaussianDistribution(GaussianDistribution):
-    """GaussianDistribution with a hard clamp on the learned std parameter.
+class _IdentityModule(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
 
-    Prevents the action std from exploding during early training when task
-    reward is sparse and the entropy gradient becomes the dominant signal.
-    The clamp is applied at sample time (not gradient time), so gradients
-    still flow through std_param — they just can't push std above max_std.
+
+class ClampedGaussianDistribution(Distribution):
+    """Gaussian distribution with a hard clamp on the learned std.
+
+    Inherits directly from Distribution (not GaussianDistribution) to avoid
+    rsl_rl version-compatibility issues with std_range handling. Functionally
+    identical to GaussianDistribution but with std clamped to [min_std, max_std].
     """
 
     def __init__(
@@ -22,21 +27,68 @@ class ClampedGaussianDistribution(GaussianDistribution):
         min_std: float = 0.05,
         max_std: float = 2.0,
     ) -> None:
-        # Newer rsl_rl versions added a native std_range parameter to
-        # GaussianDistribution. Pass it when supported; fall back for older installs.
-        try:
-            super().__init__(output_dim, init_std, std_type, std_range=(min_std, max_std))
-        except TypeError:
-            super().__init__(output_dim, init_std, std_type)
+        super().__init__(output_dim)
+        self.std_type = std_type
         self._min_std = min_std
         self._max_std = max_std
+
+        if std_type == "scalar":
+            self.std_param = nn.Parameter(init_std * torch.ones(output_dim))
+        elif std_type == "log":
+            self.log_std_param = nn.Parameter(torch.log(init_std * torch.ones(output_dim)))
+        else:
+            raise ValueError(f"Unknown std_type: {std_type}")
+
+        self._distribution: Normal | None = None
+        Normal.set_default_validate_args(False)
 
     def update(self, mlp_output: torch.Tensor) -> None:
         mean = mlp_output
         if self.std_type == "scalar":
             std = torch.clamp(self.std_param, self._min_std, self._max_std).expand_as(mean)
-        elif self.std_type == "log":
-            std = torch.clamp(torch.exp(self.log_std_param), self._min_std, self._max_std).expand_as(mean)
         else:
-            raise ValueError(f"Unknown std_type: {self.std_type}")
+            std = torch.clamp(torch.exp(self.log_std_param), self._min_std, self._max_std).expand_as(mean)
         self._distribution = Normal(mean, std)
+
+    def sample(self) -> torch.Tensor:
+        return self._distribution.sample()  # type: ignore
+
+    def deterministic_output(self, mlp_output: torch.Tensor) -> torch.Tensor:
+        return mlp_output
+
+    def as_deterministic_output_module(self) -> nn.Module:
+        return _IdentityModule()
+
+    @property
+    def input_dim(self) -> int:
+        return self.output_dim
+
+    @property
+    def mean(self) -> torch.Tensor:
+        return self._distribution.mean  # type: ignore
+
+    @property
+    def std(self) -> torch.Tensor:
+        return self._distribution.stddev  # type: ignore
+
+    @property
+    def entropy(self) -> torch.Tensor:
+        return self._distribution.entropy().sum(dim=-1)  # type: ignore
+
+    @property
+    def params(self) -> tuple[torch.Tensor, ...]:
+        return (self.mean, self.std)
+
+    def log_prob(self, outputs: torch.Tensor) -> torch.Tensor:
+        return self._distribution.log_prob(outputs).sum(dim=-1)  # type: ignore
+
+    def kl_divergence(
+        self,
+        old_params: tuple[torch.Tensor, ...],
+        new_params: tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        old_mean, old_std = old_params
+        new_mean, new_std = new_params
+        return torch.distributions.kl_divergence(
+            Normal(old_mean, old_std), Normal(new_mean, new_std)
+        ).sum(dim=-1)
