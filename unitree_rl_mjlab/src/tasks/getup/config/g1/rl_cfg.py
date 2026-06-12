@@ -19,9 +19,11 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             activation="elu",
             obs_normalization=True,
             distribution_cfg={
-                "class_name": "GaussianDistribution",
+                "class_name": "src.tasks.getup.rl.distribution:ClampedGaussianDistribution",
                 "init_std": 1.0,
                 "std_type": "scalar",
+                "min_std": 0.05,
+                "max_std": 2.0,
             },
         ),
         # HoST-style critic: this config is applied to EACH of the 4 group critics
@@ -46,7 +48,7 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             # objective sums L(phi_i) = ||return_i - V_i||^2 over the 4 group critics.
             use_clipped_value_loss=False,
             clip_param=0.2,
-            entropy_coef=0.01,
+            entropy_coef=0.001,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=5.0e-4,

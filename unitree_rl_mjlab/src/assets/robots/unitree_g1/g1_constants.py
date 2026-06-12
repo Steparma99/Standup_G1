@@ -196,21 +196,29 @@ G1_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
 # ---------------------------------------------------------------------------
 # HoST get-up PD override.
 #
-# HoST sets hip Kp=200 and knee Kp=275 (compensating the sim-to-real torque gap
-# observed in joint phase plots); all other joints keep their armature-derived
-# stiffness, and damping (Kd) is unchanged everywhere. The baseline groups above
-# mix joint *function* with motor *type* — the 7520-14 group is hip_pitch +
-# hip_yaw + waist_yaw, and the 7520-22 group is hip_roll + knee — so we cannot
-# just bump a group's stiffness without dragging waist_yaw to 200 or hip_roll to
-# 275. We therefore SPLIT those two groups by function below: each sub-group keeps
-# its own motor's armature / effort_limit / damping (those are physical, per
-# motor) but takes the HoST stiffness. These are used ONLY by
-# get_g1_supine_robot_cfg_host() via G1_ARTICULATION_HOST; the shared
+# HoST sets hip Kp=200, knee Kp=275, and arm (shoulder/elbow/wrist) Kp=100
+# (compensating the sim-to-real torque gap observed in joint phase plots, and
+# making the arms responsive enough to push off the ground); damping (Kd) is
+# unchanged everywhere. The baseline groups above mix joint *function* with motor
+# *type* — the 7520-14 group is hip_pitch + hip_yaw + waist_yaw, and the 7520-22
+# group is hip_roll + knee — so we cannot just bump a group's stiffness without
+# dragging waist_yaw to 200 or hip_roll to 275. We therefore SPLIT those two
+# groups by function below, and likewise give the 5020 arm group its own HoST
+# stiffness; each sub-group keeps its own motor's armature / effort_limit /
+# damping (those are physical, per motor) but takes the HoST stiffness. These are
+# used ONLY by get_g1_supine_robot_cfg_host() via G1_ARTICULATION_HOST; the shared
 # G1_ARTICULATION / G1_ACTION_SCALE are left untouched, so the velocity task and
-# every other G1 task keep their original gains.
+# every other G1 task keep their original gains. (waist_yaw and the 4010 wrist
+# pitch/yaw keep their armature-derived stiffness — HoST has no override for them.)
 # ---------------------------------------------------------------------------
 HOST_HIP_KP = 200.0
 HOST_KNEE_KP = 275.0
+# Arm stiffness (shoulder/elbow/wrist_roll, all 5020 motors). HoST uses Kp=100 for
+# shoulder/elbow/wrist; the baseline armature-derived stiffness here is ~0.9, which
+# makes the arms far too compliant to push during get-up (they barely move). Boost
+# to the HoST value so the arms are responsive. Kd / effort_limit / armature stay
+# at the physical 5020 values.
+HOST_ARM_KP = 100.0
 
 # Hip pitch + hip yaw (7520-14 motor) — HoST Kp=200.
 G1_ACTUATOR_HOST_HIP_PITCH_YAW = BuiltinPositionActuatorCfg(
@@ -243,6 +251,23 @@ G1_ACTUATOR_HOST_KNEE = BuiltinPositionActuatorCfg(
   damping=DAMPING_7520_22,
   effort_limit=ACTUATOR_7520_22.effort_limit,
   armature=ACTUATOR_7520_22.reflected_inertia,
+)
+# Arms: shoulder (pitch/roll/yaw) + elbow + wrist_roll (5020 motor) — HoST Kp=100.
+# Same target set as G1_ACTUATOR_5020 but with the HoST arm stiffness so the arms
+# are responsive enough to push off the ground during get-up. Replaces
+# G1_ACTUATOR_5020 in G1_ARTICULATION_HOST.
+G1_ACTUATOR_HOST_ARM = BuiltinPositionActuatorCfg(
+  target_names_expr=(
+    ".*_elbow_joint",
+    ".*_shoulder_pitch_joint",
+    ".*_shoulder_roll_joint",
+    ".*_shoulder_yaw_joint",
+    ".*_wrist_roll_joint",
+  ),
+  stiffness=HOST_ARM_KP,
+  damping=DAMPING_5020,
+  effort_limit=ACTUATOR_5020.effort_limit,
+  armature=ACTUATOR_5020.reflected_inertia,
 )
 
 ##
@@ -477,7 +502,7 @@ G1_ARTICULATION = EntityArticulationInfoCfg(
 # HoST PD override block above). Covers all 29 DOF exactly once.
 G1_ARTICULATION_HOST = EntityArticulationInfoCfg(
   actuators=(
-    G1_ACTUATOR_5020,
+    G1_ACTUATOR_HOST_ARM,
     G1_ACTUATOR_HOST_HIP_PITCH_YAW,
     G1_ACTUATOR_HOST_WAIST_YAW,
     G1_ACTUATOR_HOST_HIP_ROLL,

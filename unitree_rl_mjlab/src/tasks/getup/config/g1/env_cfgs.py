@@ -30,6 +30,15 @@ _DR_PD_GAINS_ENABLE       = False    # P1.5: scale Kp/Kd per env
 _DR_ACTION_DELAY_ENABLE   = False    # P1.6: action lag buffer per env
 
 # ---------------------------------------------------------------------------
+# Pose perturbation. When False the robot spawns at the EXACT canonical
+# keyframe pose (no joint noise, no root roll/pitch noise). All 5 canonical
+# poses (SUPINE, PRONE, SIDE_LEFT, SIDE_RIGHT, SEATED) are always used for
+# episode diversity; this flag only controls whether random noise is added
+# around each pose. Set to True once the policy reliably stands from all poses.
+# ---------------------------------------------------------------------------
+_ADD_POSE_PERTURBATION = False
+
+# ---------------------------------------------------------------------------
 # Assistance curriculum (HoST-style decaying upward support force on the torso).
 # Bootstraps get-up learning: a per-env force helps the robot rise and decays
 # toward zero as each env succeeds, so the help anneals away on its own.
@@ -39,6 +48,9 @@ _ASSIST_INITIAL_FORCE_N        = 120.0   # ~30% of G1 weight (~400 N); gentle li
 _ASSIST_FORCE_DECAY_PER_SUCCESS = 5.0    # N removed per successful episode (per env)
 _ASSIST_FORCE_MIN              = 0.0     # fully unassisted floor
 _ASSIST_SUCCESS_HEIGHT         = 0.65    # pelvis height counting as "stood" (task threshold)
+_ASSIST_PROGRESS_FLOOR         = 0.45   # min height for partial-credit decay; must be above
+                                         # the robot's natural lying height (~0.20 m for PRONE
+                                         # + fall_height) so a failed episode earns no credit
 _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated/settle
                                          # window (HoST gates pull_force by
                                          # real_episode_length_buf > unactuated_time=30,
@@ -110,9 +122,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # variant (hip Kp=200, knee Kp=275; all other gains/damping unchanged).
     cfg.scene.entities = {"robot": get_g1_supine_robot_cfg_host()}
 
-    # Reference poses for the multi-pose randomized reset. Add more poses here as
-    # they are validated. To test a SINGLE fixed pose first, set this to
-    # (SUPINE_KEYFRAME,) and zero the ranges in getup_env_cfg.py.
+    # All 5 canonical poses for episode diversity (SUPINE, PRONE, SIDE_LEFT,
+    # SIDE_RIGHT, SEATED). SEATED is the closest to standing and gives the
+    # curriculum its earliest success signals; PRONE is important for real-world
+    # forward falls. Perturbation noise is disabled until _ADD_POSE_PERTURBATION=True.
     cfg.events["reset_pose"].params["keyframes"] = (
         SUPINE_KEYFRAME,
         PRONE_KEYFRAME,
@@ -120,6 +133,9 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         SIDE_RIGHT_KEYFRAME,
         SEATED_KEYFRAME,
     )
+    if not _ADD_POSE_PERTURBATION:
+        cfg.events["reset_pose"].params["joint_pos_range"] = {}
+        cfg.events["reset_pose"].params["pose_range"] = {}
 
     # Spawn each keyframe lifted by _RESET_FALL_HEIGHT so the robot falls a small
     # gentle distance onto the floor every reset (see constant above).
@@ -344,6 +360,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "force_decay_per_success": _ASSIST_FORCE_DECAY_PER_SUCCESS,
                 "force_min": _ASSIST_FORCE_MIN,
                 "success_height": _ASSIST_SUCCESS_HEIGHT,
+                "progress_floor": _ASSIST_PROGRESS_FLOOR,
                 "unactuated_steps": _ASSIST_UNACTUATED_STEPS,
             },
         )

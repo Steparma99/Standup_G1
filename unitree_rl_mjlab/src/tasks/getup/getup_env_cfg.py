@@ -703,9 +703,9 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_acc_l2, weight=-2.5e-7,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-1e-2),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-1e-3),
         # Smoothness = second action difference ||a_t - 2 a_{t-1} + a_{t-2}||².
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-1e-2),
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-1e-3),
         "joint_torques_l2": RewardTermCfg(
             func=mdp.joint_torques_l2, weight=-2.5e-6,
             params={"asset_cfg": SceneEntityCfg("robot")},
@@ -720,8 +720,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         # Strongest in the group: PD target-vs-measured gap (implicit effort penalty).
+        # HoST uses -2.5e-4 here; the previous -2.5e-1 was 1000x harsher, which
+        # discouraged moving any joint off its default (esp. the arms). Reduced 10x
+        # to -2.5e-2 — still a meaningful effort penalty but no longer pinning the
+        # arms in place now that the arm PD gains are responsive (Kp=100).
         "joint_tracking_error": RewardTermCfg(
-            func=mdp.joint_tracking_error, weight=-2.5e-1,
+            func=mdp.joint_tracking_error, weight=-2.5e-2,
             params={"action_name": "joint_pos", "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Hard-wall joint position limit penalty (very high coefficient).

@@ -3,6 +3,8 @@
 import logging
 import os
 import sys
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -31,12 +33,52 @@ class TrainConfig:
   enable_nan_guard: bool = False
   torchrunx_log_dir: str | None = None
   gpu_ids: list[int] | Literal["all"] | None = field(default_factory=lambda: [0])
+  viewer: bool = False
+  """Open a live Viser viewer at http://localhost:8080 while training (background thread)."""
+  viewer_fps: float = 30.0
+  """Target frame rate for the live training viewer."""
 
   @staticmethod
   def from_task(task_id: str) -> "TrainConfig":
     env_cfg = load_env_cfg(task_id)
     agent_cfg = load_rl_cfg(task_id)
     return TrainConfig(env=env_cfg, agent=agent_cfg)
+
+
+def _start_training_viewer(env: "ManagerBasedRlEnv", fps: float = 30.0) -> None:
+  """Start a Viser viewer in a background daemon thread.
+
+  Reads the sim state every 1/fps seconds and pushes it to the browser at
+  http://localhost:8080. Thread-safe at the cost of occasional torn frames
+  (visually harmless). Dies automatically when the training process exits.
+  """
+  import viser
+  from mjlab.viewer.viser.scene import ViserMujocoScene
+  from mjlab.sim.sim import Simulation
+
+  sim = env.unwrapped.sim
+  assert isinstance(sim, Simulation), "Expected mjlab Simulation"
+
+  server = viser.ViserServer(label="mjlab training")
+  scene = ViserMujocoScene.create(
+    server=server,
+    mj_model=sim.mj_model,
+    num_envs=env.num_envs,
+  )
+  scene.env_idx = 0
+  interval = 1.0 / fps
+
+  def _loop() -> None:
+    while True:
+      try:
+        scene.update(sim.data)
+      except Exception:
+        pass
+      time.sleep(interval)
+
+  t = threading.Thread(target=_loop, daemon=True, name="training-viser")
+  t.start()
+  print(f"[INFO] Training viewer → http://localhost:8080  (env 0, {fps:.0f} fps)")
 
 
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
@@ -92,6 +134,9 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   env = ManagerBasedRlEnv(
     cfg=cfg.env, device=device, render_mode="rgb_array" if cfg.video else None
   )
+
+  if cfg.viewer:
+    _start_training_viewer(env, cfg.viewer_fps)
 
   log_root_path = log_dir.parent  # Go up from specific run dir to experiment dir.
 
