@@ -22,7 +22,12 @@ class ClampedGaussianDistribution(GaussianDistribution):
         min_std: float = 0.05,
         max_std: float = 2.0,
     ) -> None:
-        super().__init__(output_dim, init_std, std_type)
+        # Newer rsl_rl versions added a native std_range parameter to
+        # GaussianDistribution. Pass it when supported; fall back for older installs.
+        try:
+            super().__init__(output_dim, init_std, std_type, std_range=(min_std, max_std))
+        except TypeError:
+            super().__init__(output_dim, init_std, std_type)
         self._min_std = min_std
         self._max_std = max_std
 
