@@ -48,7 +48,7 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             # objective sums L(phi_i) = ||return_i - V_i||^2 over the 4 group critics.
             use_clipped_value_loss=False,
             clip_param=0.2,
-            entropy_coef=0.001,
+            entropy_coef=0.005,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=5.0e-4,

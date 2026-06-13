@@ -316,6 +316,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["task_head_height"].params["asset_cfg"].body_names = ("torso_link",)
     cfg.rewards["style_foot_displacement"].params["asset_cfg"].site_names = site_names
     cfg.rewards["style_foot_distance"].params["asset_cfg"].site_names = site_names
+    cfg.rewards["supine_rising_prep"].params["asset_cfg"].site_names = site_names
 
     # Post-task upper-body posture: target = HOME standing pose, masked to the
     # upper-body joints (arms + waist); legs/ankles get weight 0 (default).

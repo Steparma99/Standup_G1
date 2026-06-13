@@ -621,6 +621,27 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # ===================================================================
         # TASK group (HoST definitive): high-level objectives, weight 1 each.
         # ===================================================================
+        # Stage-0 bootstrap: directional/progress rewards active while the robot is
+        # on the floor (h < 0.40 m). All three are progress-based (reward the delta,
+        # not the absolute pose), so parking in any static pose earns 0 — they cannot
+        # be farmed. Weight=1.0 matches the existing task terms; output [0,1]/step.
+        "height_progress": RewardTermCfg(
+            func=mdp.height_progress,
+            weight=1.0,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "prone_recovery": RewardTermCfg(
+            func=mdp.prone_recovery,
+            weight=1.0,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # supine_rising_prep needs foot site names (set per-robot in env_cfgs.py).
+        # Output [0, 0.5]/step (gated to supine+low height only).
+        "supine_rising_prep": RewardTermCfg(
+            func=mdp.supine_rising_prep,
+            weight=1.0,
+            params={"asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
         # Head height: f_tol(h_head, [1, inf), margin=1, value=0.1). h_head uses
         # torso_link as a proxy (no separate head body); set per-robot (env_cfgs.py).
         "task_head_height": RewardTermCfg(
@@ -819,6 +840,20 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "ground_penetration": TerminationTermCfg(
             func=mdp.root_height_below_minimum,
             params={"minimum_height": -0.3, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Failure termination (no time_out=True): penalises stalling. Tracks the best
+        # pelvis height reached this episode; if no new record > min_progress is set
+        # for n_stall_steps consecutive steps (past the grace window), the episode
+        # ends and is_terminated fires. Prevents the robot from hovering at an
+        # intermediate height for 500 steps without penalty.
+        "no_progress_timeout": TerminationTermCfg(
+            func=mdp.no_progress_timeout,
+            params={
+                "min_progress": 0.02,
+                "n_stall_steps": 200,
+                "grace_steps": _UNACTUATED_STEPS + 20,  # settle + first-attempt buffer
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
         ),
     }
 
