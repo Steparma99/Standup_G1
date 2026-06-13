@@ -20,7 +20,9 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             obs_normalization=True,
             distribution_cfg={
                 "class_name": "src.tasks.getup.rl.distribution:ClampedGaussianDistribution",
-                "init_std": 1.0,
+                "init_std": 1.5,  # raised 1.0->1.5: wider initial exploration to
+                                  # help discover the stand-up motion (max_std=2.0
+                                  # leaves headroom; adaptive-KL will shrink it).
                 "std_type": "scalar",
                 "min_std": 0.05,
                 "max_std": 2.0,
