@@ -1166,6 +1166,65 @@ def style_base_ang_vel(
     return r * gate
 
 
+def style_ankle_parallel(
+    env: ManagerBasedRlEnv,
+    tilt_threshold: float = 0.05,
+    reward: float = 20.0,
+    foot_names: tuple[str, ...] = ("left_ankle_roll_link", "right_ankle_roll_link"),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """HoST ankle parallel: Gaussian reward peaking at +reward when both feet are flat [B,].
+
+    Gaussian reward (peak default 20) that decays smoothly as feet tilt away from flat.
+    Provides dense gradient signal toward flat feet throughout training, not just a binary
+    cliff at the threshold.
+
+    HoST measures flatness as the variance of per-foot keypoint heights. The G1's sole
+    collision geoms are a thin LATERAL line (no fore-aft extent), so their z-variance is
+    blind to foot pitch and unusable as a proxy (measured ~0.0002 in every pose). Instead
+    we use the kinematically robust, ISOTROPIC equivalent: project gravity into each foot
+    frame and take ‖proj_grav_xy‖² (the squared sine of the foot's tilt from horizontal —
+    same quantity as `feet_flat`). It is ~0 when a foot rests flat (foot up-axis vertical,
+    the standing target) and grows with pitch OR roll. `tilt_threshold` sets the Gaussian
+    width: exp(-tilt / (2*thr)) → at thr the reward is ~61% of peak; lying poses (tilt≥0.76)
+    → ~0.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = _cached_body_ids(env, asset, foot_names, "_ankle_parallel_ids")
+    quat = asset.data.body_link_quat_w[:, ids, :]  # [B, 2, 4]
+    g = asset.data.gravity_vec_w.unsqueeze(1).expand(-1, quat.shape[1], -1)  # [B, 2, 3]
+    pg = quat_apply_inverse(quat, g)  # [B, 2, 3]
+    tilt = pg[..., :2].pow(2).sum(dim=-1).mean(dim=1)  # [B]; 0 flat -> grows with tilt
+    return reward * torch.exp(-tilt / (2 * tilt_threshold))
+
+
+def style_feet_stumble(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    ratio: float = 3.0,
+    penalty: float = 0.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """HoST feet stumble: 1(∃i, |F_xy_i| > ratio·|F_z_i|) · penalty [B,].
+
+    Penalizes a foot whose horizontal contact force exceeds `ratio`× its vertical
+    force — i.e. the foot scraping / stumbling against a surface edge rather than
+    pressing down. HoST gives this 0 on flat Ground and −25 on platform/slope/wall
+    (PSW). This env is flat-ground only, so `penalty` defaults to 0 (a no-op scaffold);
+    raise its magnitude when the PSW terrains are added in the Sim2Real phase.
+    """
+    sensor: ContactSensor = env.scene[sensor_name]
+    force = sensor.data.force
+    if force is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    if force.ndim == 2:  # [B, 3] -> [B, 1, 3]
+        force = force.unsqueeze(1)
+    f_xy = torch.norm(force[..., :2], dim=-1)  # [B, N]
+    f_z = force[..., 2].abs()  # [B, N]
+    viol = (f_xy > ratio * f_z).any(dim=1).float()  # [B]
+    return penalty * viol
+
+
 # --- Post-task group (HoST) ------------------------------------------------
 # Shape the held standing state. Every term is gated by the HARD indicator
 # 1(h_base > H_STAGE2) and is zero until the robot is actually standing.

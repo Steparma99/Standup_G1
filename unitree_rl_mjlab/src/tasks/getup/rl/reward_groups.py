@@ -41,6 +41,8 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "style_foot_distance": "style",
     "style_shank_orientation": "style",
     "style_base_ang_vel": "style",
+    "style_ankle_parallel": "style",
+    "style_feet_stumble": "style",
     # --- REGULARIZATION (HoST definitive): weak shaping penalties ------------------
     "joint_acc_l2": "regularization",
     "action_rate_l2": "regularization",

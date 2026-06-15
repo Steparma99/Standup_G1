@@ -716,6 +716,24 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
+        # Ankle parallel: binary +20 (highest style weight) when both feet are flat.
+        # The +20 magnitude lives in the function, so weight=1.0 (binary-term convention).
+        # tilt_threshold = mean per-foot ||proj_grav_xy||^2; 0.05 ~ within 13 deg of flat
+        # (HoST's keypoint-variance proxy is unusable on the G1's lateral sole geoms).
+        "style_ankle_parallel": RewardTermCfg(
+            func=mdp.style_ankle_parallel,
+            weight=1.0,
+            params={"tilt_threshold": 0.05, "reward": 20.0,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Feet stumble: 0 on flat Ground (this env) -> weight 0 no-op scaffold. Raise the
+        # penalty magnitude when platform/slope/wall terrains are added (Sim2Real phase).
+        "style_feet_stumble": RewardTermCfg(
+            func=mdp.style_feet_stumble,
+            weight=0.0,
+            params={"sensor_name": "feet_ground_contact", "ratio": 3.0, "penalty": 0.0,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
         # ===================================================================
         # REGULARIZATION group (HoST definitive), group weight 0.1: weak shaping
         # penalties (all 9 terms wired).
