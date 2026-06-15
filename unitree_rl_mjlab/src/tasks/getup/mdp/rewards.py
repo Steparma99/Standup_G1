@@ -1145,7 +1145,7 @@ def style_shank_orientation(
     cos = vec[..., 2] / (torch.norm(vec, dim=-1) + 1e-6)  # [B, 2]
     mean_cos = cos.mean(dim=1)  # [B]
     r = f_tol(mean_cos, lower, float("inf"), margin, value_at_margin)
-    gate = (asset.data.root_link_pos_w[:, 2] > H_STAGE1).float()
+    gate = _standing_gate(asset.data.root_link_pos_w[:, 2], H_STAGE1, band=0.08)
     return r * gate
 
 
@@ -1162,7 +1162,7 @@ def style_base_ang_vel(
     asset: Entity = env.scene[asset_cfg.name]
     w_xy = asset.data.root_link_ang_vel_b[:, :2]
     r = torch.exp(-scale * w_xy.pow(2).sum(dim=1))
-    gate = (asset.data.root_link_pos_w[:, 2] > H_STAGE1).float()
+    gate = _standing_gate(asset.data.root_link_pos_w[:, 2], H_STAGE1, band=0.04)
     return r * gate
 
 
@@ -1232,9 +1232,15 @@ def style_feet_stumble(
 _POST_UPPER_CACHE_ATTR = "_post_upper_body_cache"
 
 
-def _post_gate(asset: Entity, height_threshold: float = H_STAGE2) -> torch.Tensor:
-    """Hard post-task gate 1(h_base > height_threshold) [B,]."""
-    return (asset.data.root_link_pos_w[:, 2] > height_threshold).float()
+def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.06) -> torch.Tensor:
+    """Smooth post-task gate: linear ramp from 0→1 over [threshold-band, threshold+band] [B,].
+
+    Replaces the previous hard step to give the policy gradient signal as it approaches
+    standing height. With default band=0.06: ramp spans [0.59m, 0.71m]; all lying poses
+    (h<0.37m) still receive ~0; the cliff at H_STAGE2 is removed.
+    """
+    h = asset.data.root_link_pos_w[:, 2]
+    return _standing_gate(h, height_threshold, band=band)
 
 
 def post_base_ang_vel(
