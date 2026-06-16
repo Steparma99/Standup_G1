@@ -34,6 +34,11 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
+  eval_beta: float | None = None
+  """Override the action-rescaler beta used at eval time (default: the env's play-mode floor,
+  typically 0.25). Set this to the run's actual curriculum/beta_rescaler value from tensorboard
+  when visualizing an in-progress checkpoint whose curriculum hasn't reached the floor yet —
+  otherwise the policy is evaluated at an action scale it never trained at."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -54,6 +59,10 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.no_terminations:
     env_cfg.terminations = {}
     print("[INFO]: Terminations disabled")
+
+  if cfg.eval_beta is not None and "beta_rescaler_curriculum" in env_cfg.events:
+    env_cfg.events["beta_rescaler_curriculum"].params["initial_beta"] = cfg.eval_beta
+    print(f"[INFO]: Overriding eval beta to {cfg.eval_beta}")
 
   # Check if this is a tracking task by checking for motion command.
   is_tracking_task = "motion" in env_cfg.commands and isinstance(
