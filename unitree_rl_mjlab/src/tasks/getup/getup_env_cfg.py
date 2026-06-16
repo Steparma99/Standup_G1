@@ -821,6 +821,14 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.post_feet_parallel, weight=2.5,
             params={"scale": 20.0, "clip_min": 0.02, "asset_cfg": SceneEntityCfg("robot")},
         ),
+        # Explicit bonus for holding the stand (not just touching it for a frame).
+        # Also the only writer of episode_state["ever_stood"]/["standing_counter"],
+        # which success/ever_stood, success/stable_hold and no_progress_timeout's
+        # post-standing exemption all depend on.
+        "stable_success_hold": RewardTermCfg(
+            func=mdp.stable_success_hold, weight=10.0,
+            params={"n_hold": 50, "height_threshold": 0.65, "asset_cfg": SceneEntityCfg("robot")},
+        ),
     }
 
     ##

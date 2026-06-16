@@ -177,6 +177,14 @@ def no_progress_timeout(
     Registered WITHOUT time_out=True, so it counts as a failure termination and
     activates the is_terminated penalty — stalling is punished, not free.
 
+    Exempt once the robot has ever reached standing height this episode
+    (state["ever_stood"], written by stable_success_hold): the stall clock exists
+    to stop the policy farming shaping rewards by lying motionless before ever
+    standing, not to punish balancing/holding once it has already gotten there.
+    Without this, a robot that reaches the standing band and then just wobbles
+    near its peak (never beating it by min_progress) gets killed in ~n_stall_steps
+    regardless — exactly the practice time it needs to learn to hold the stand.
+
     Reads/writes only its own episode state (best_height, stall_counter), so the
     terminations-before-rewards ordering introduces no lag here.
     """
@@ -192,7 +200,7 @@ def no_progress_timeout(
     )
     stalled = state["stall_counter"] >= n_stall_steps
     past_grace = env.episode_length_buf > grace_steps
-    return stalled & past_grace
+    return stalled & past_grace & ~state["ever_stood"]
 
 
 def head_impact_termination(
