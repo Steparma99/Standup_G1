@@ -42,9 +42,13 @@ DEFAULT_TAGS = [
     "Episode_Reward/action_rate_l2",          # smoothness (now -2.5e-3)
     "Episode_Reward/action_acc_l2",           # smoothness (now -2.5e-3)
     "Episode_Reward/joint_vel_l2",            # global joint vel (now -2e-4)
-    "Episode_Reward/post_base_orientation",   # upright hold (scale 5->8)
-    "Episode_Reward/post_upper_body_posture", # arm posture (now active from 0.5 m)
-    "Episode_Reward/task_base_orientation",   # uprightness during the rise
+    "Episode_Reward/post_base_orientation",        # upright hold
+    "Episode_Reward/post_upper_body_posture",      # arm posture (threshold now 0.65)
+    "Episode_Reward/task_base_orientation",        # uprightness during the rise
+    # --- smoother_v3: new monitoring targets ---
+    "Episode_Reward/style_shoulder_roll_deviation", # should be near 0 (limit widened to ±0.4)
+    "Episode_Reward/post_base_height",              # should be near +10 (target fixed to 0.80m)
+    "Episode_Reward/post_feet_parallel",            # should be near +2.5 (clip_min fixed)
 ]
 
 
