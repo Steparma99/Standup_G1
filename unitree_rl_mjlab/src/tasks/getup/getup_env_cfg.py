@@ -671,6 +671,16 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"limit": 1.4, "penalty": -10.0,
                     "asset_cfg": SceneEntityCfg("robot", joint_names=("waist_yaw_joint",))},
         ),
+        # Keep the trunk straight once rising past ~0.5 m (gate_lo=0.5). Soft band penalty
+        # on waist pitch+roll; gated so it does NOT block the curl/flexion early in the
+        # rise, only straightens the torso as the robot approaches standing.
+        "style_waist_upright": RewardTermCfg(
+            func=mdp.joint_group_deviation,
+            weight=-2.0,
+            params={"lower": -0.2, "upper": 0.2, "gate_lo": 0.5, "band": 0.1,
+                    "asset_cfg": SceneEntityCfg(
+                        "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
+        ),
         "style_hip_deviation": RewardTermCfg(
             func=mdp.style_hip_deviation,
             weight=1.0,
@@ -742,9 +752,9 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_acc_l2, weight=0, # -2.5e-7,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-1e-3),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-2.5e-3),
         # Smoothness = second action difference ||a_t - 2 a_{t-1} + a_{t-2}||².
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-1e-3),
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-2.5e-3),
         "joint_torques_l2": RewardTermCfg(
             func=mdp.joint_torques_l2, weight=0, #-2.5e-6,
             params={"asset_cfg": SceneEntityCfg("robot")},
@@ -755,8 +765,16 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         "joint_vel_l2": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=-1e-4,
+            func=mdp.joint_vel_l2, weight=-2e-4,
             params={"asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Arm-specific velocity penalty: calms shoulder/elbow/wrist flailing during the
+        # rise (the global joint_vel_l2 above is too weak to constrain the arms, and the
+        # only arm-posture term is gated to standing). Reuses the shared joint_vel_l2.
+        "reg_arm_vel": RewardTermCfg(
+            func=mdp.joint_vel_l2, weight=-5e-4,
+            params={"asset_cfg": SceneEntityCfg(
+                "robot", joint_names=(".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"))},
         ),
         # Strongest in the group: PD target-vs-measured gap (implicit effort penalty).
         # HoST uses -2.5e-4 here; the previous -2.5e-1 was 1000x harsher, which
@@ -804,7 +822,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         "post_base_orientation": RewardTermCfg(
             func=mdp.post_base_orientation, weight=10.0,
-            params={"scale": 5.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={"scale": 8.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Base height target 0.7 m (flat ground); tight Gaussian (-20).
         "post_base_height": RewardTermCfg(
@@ -815,6 +833,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "post_upper_body_posture": RewardTermCfg(
             func=mdp.post_upper_body_posture, weight=10.0,
             params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.1,
+                    "height_threshold": 0.5,  # pull arms toward HOME a bit earlier in the rise
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_feet_parallel": RewardTermCfg(

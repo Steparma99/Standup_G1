@@ -34,6 +34,7 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "supine_rising_prep": "task",
     # --- STYLE (HoST definitive): motion shaping ----------------------------------
     "style_waist_yaw_deviation": "style",
+    "style_waist_upright": "style",
     "style_hip_deviation": "style",
     "style_knee_deviation": "style",
     "style_shoulder_roll_deviation": "style",
@@ -50,6 +51,7 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "joint_torques_l2": "regularization",
     "joint_power_l2": "regularization",
     "joint_vel_l2": "regularization",
+    "reg_arm_vel": "regularization",
     "joint_tracking_error": "regularization",
     "joint_pos_limits": "regularization",
     "joint_vel_limits": "regularization",
