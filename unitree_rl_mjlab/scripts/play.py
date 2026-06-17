@@ -27,10 +27,10 @@ class PlayConfig:
   num_envs: int | None = None
   device: str | None = None
   video: bool = False
+  """Record a video headlessly and exit (no interactive viewer is launched)."""
   video_length: int = 200
   video_height: int | None = None
   video_width: int | None = None
-  camera: int | str | None = None
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
@@ -39,6 +39,26 @@ class PlayConfig:
   typically 0.25). Set this to the run's actual curriculum/beta_rescaler value from tensorboard
   when visualizing an in-progress checkpoint whose curriculum hasn't reached the floor yet —
   otherwise the policy is evaluated at an action scale it never trained at."""
+
+  # --- Render / camera controls (apply to both the recorded video and the
+  # viser offscreen view). All default to None == "keep the task's value". ---
+  max_extra_envs: int | None = None
+  """Number of neighboring environments to also render in the frame (multi-env view).
+  Needs --num-envs > 1 to have any effect. The task default is 2."""
+  env_idx: int | None = None
+  """Index of the environment the camera tracks / centers on."""
+  cam_distance: float | None = None
+  """Camera distance from the tracked body (larger = more zoomed out)."""
+  cam_elevation: float | None = None
+  """Camera elevation angle in degrees (negative looks down)."""
+  cam_azimuth: float | None = None
+  """Camera azimuth angle in degrees."""
+  cam_fovy: float | None = None
+  """Vertical field of view in degrees (only used for free/world cameras)."""
+  shadows: bool = True
+  """Render shadows (disable for a flatter, cheaper look)."""
+  reflections: bool = True
+  """Render floor reflections."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -123,6 +143,22 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.video_width is not None:
     env_cfg.viewer.width = cfg.video_width
 
+  # Render / camera overrides (offscreen renderer reads env_cfg.viewer).
+  if cfg.max_extra_envs is not None:
+    env_cfg.viewer.max_extra_envs = cfg.max_extra_envs
+  if cfg.env_idx is not None:
+    env_cfg.viewer.env_idx = cfg.env_idx
+  if cfg.cam_distance is not None:
+    env_cfg.viewer.distance = cfg.cam_distance
+  if cfg.cam_elevation is not None:
+    env_cfg.viewer.elevation = cfg.cam_elevation
+  if cfg.cam_azimuth is not None:
+    env_cfg.viewer.azimuth = cfg.cam_azimuth
+  if cfg.cam_fovy is not None:
+    env_cfg.viewer.fovy = cfg.cam_fovy
+  env_cfg.viewer.enable_shadows = cfg.shadows
+  env_cfg.viewer.enable_reflections = cfg.reflections
+
   render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
   if cfg.video and DUMMY_MODE:
     print(
@@ -138,7 +174,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       video_folder=log_dir / "videos" / "play",
       step_trigger=lambda step: step == 0,
       video_length=cfg.video_length,
-      disable_logger=True,
+      disable_logger=False,
     )
 
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -167,6 +203,20 @@ def run_play(task_id: str, cfg: PlayConfig):
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
     policy = runner.get_inference_policy(device=device)
+
+  # Headless recording mode: step the policy, write the video, and exit without
+  # launching an interactive viewer.
+  if TRAINED_MODE and cfg.video:
+    print(f"[INFO] Recording {cfg.video_length} frames (headless)...")
+    obs = env.get_observations()
+    # +5 step margin so the recorder reaches video_length frames and flushes.
+    for _ in range(cfg.video_length + 5):
+      with torch.no_grad():
+        actions = policy(obs)
+      env.step(actions)
+      obs = env.get_observations()
+    env.close()
+    return
 
   # Handle "auto" viewer selection.
   if cfg.viewer == "auto":
