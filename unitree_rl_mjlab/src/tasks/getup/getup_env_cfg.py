@@ -628,7 +628,8 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "height_progress": RewardTermCfg(
             func=mdp.height_progress,
             weight=1.0,
-            params={"asset_cfg": SceneEntityCfg("robot")},
+            params={"max_step": 0.035,  # saturates at a slower rise rate -> less incentive to rocket up
+                    "asset_cfg": SceneEntityCfg("robot")},
         ),
         "prone_recovery": RewardTermCfg(
             func=mdp.prone_recovery,
@@ -676,8 +677,8 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # rise, only straightens the torso as the robot approaches standing.
         "style_waist_upright": RewardTermCfg(
             func=mdp.joint_group_deviation,
-            weight=-2.0,
-            params={"lower": -0.2, "upper": 0.2, "gate_lo": 0.5, "band": 0.1,
+            weight=-8.0,
+            params={"lower": -0.15, "upper": 0.15, "gate_lo": 0.5, "band": 0.05,
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
         ),
@@ -752,9 +753,9 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_acc_l2, weight=0, # -2.5e-7,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-2.5e-3),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-4e-3),
         # Smoothness = second action difference ||a_t - 2 a_{t-1} + a_{t-2}||².
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-2.5e-3),
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-4e-3),
         "joint_torques_l2": RewardTermCfg(
             func=mdp.joint_torques_l2, weight=0, #-2.5e-6,
             params={"asset_cfg": SceneEntityCfg("robot")},
@@ -772,7 +773,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # rise (the global joint_vel_l2 above is too weak to constrain the arms, and the
         # only arm-posture term is gated to standing). Reuses the shared joint_vel_l2.
         "reg_arm_vel": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=-5e-4,
+            func=mdp.joint_vel_l2, weight=-3e-3,
             params={"asset_cfg": SceneEntityCfg(
                 "robot", joint_names=(".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"))},
         ),
@@ -832,8 +833,8 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Soft (-0.1) default arm/waist posture; target + mask set per-robot (HOME pose).
         "post_upper_body_posture": RewardTermCfg(
             func=mdp.post_upper_body_posture, weight=10.0,
-            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.1,
-                    "height_threshold": 0.5,  # pull arms toward HOME a bit earlier in the rise
+            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.25,  # sharper pull toward HOME arms
+                    "height_threshold": 0.4,  # active for most of the rise, not just standing
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_feet_parallel": RewardTermCfg(
