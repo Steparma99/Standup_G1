@@ -677,8 +677,8 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # rise, only straightens the torso as the robot approaches standing.
         "style_waist_upright": RewardTermCfg(
             func=mdp.joint_group_deviation,
-            weight=-8.0,
-            params={"lower": -0.15, "upper": 0.15, "gate_lo": 0.5, "band": 0.05,
+            weight=-4.0,
+            params={"lower": -0.25, "upper": 0.25, "gate_lo": 0.62, "band": 0.08,
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
         ),
@@ -697,7 +697,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "style_shoulder_roll_deviation": RewardTermCfg(
             func=mdp.style_shoulder_roll_deviation,
             weight=1.0,
-            params={"left_limit": -0.02, "right_limit": 0.02, "penalty": -2.5,
+            params={"left_limit": -0.4, "right_limit": 0.4, "penalty": -2.5,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # CoM-in-support; weight 2.5 per foot (function sums both feet). Active > Stage 2.
@@ -828,18 +828,18 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Base height target 0.7 m (flat ground); tight Gaussian (-20).
         "post_base_height": RewardTermCfg(
             func=mdp.post_base_height, weight=10.0,
-            params={"target_height": 0.7, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={"target_height": 0.80, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Soft (-0.1) default arm/waist posture; target + mask set per-robot (HOME pose).
         "post_upper_body_posture": RewardTermCfg(
             func=mdp.post_upper_body_posture, weight=10.0,
-            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.25,  # sharper pull toward HOME arms
-                    "height_threshold": 0.4,  # active for most of the rise, not just standing
+            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.25,
+                    "height_threshold": 0.65,  # only shape arms once fully standing
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_feet_parallel": RewardTermCfg(
             func=mdp.post_feet_parallel, weight=2.5,
-            params={"scale": 20.0, "clip_min": 0.02, "asset_cfg": SceneEntityCfg("robot")},
+            params={"scale": 20.0, "clip_min": 0.001, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Explicit bonus for holding the stand (not just touching it for a frame).
         # Also the only writer of episode_state["ever_stood"]/["standing_counter"],
