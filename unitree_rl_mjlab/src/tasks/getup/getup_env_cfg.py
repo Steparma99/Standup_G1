@@ -837,14 +837,17 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Full-body HOME pose tracking gated to standing (h_pelvis > 0.65 m).
-        # Covers legs (high weight: fix asymmetric stance / legs-one-over-other),
-        # waist (fix crooked torso), and arms (stop random movement).
+        # Full-body HOME pose L2 penalty gated to standing (h_pelvis > 0.65 m).
+        # Uses direct weighted squared error — constant gradient at any distance from
+        # HOME. Fixes the dead-gradient problem of the exp(-kp*err) form used by
+        # standing_posture(), which saturates to zero when the robot is far from HOME
+        # (exactly when a fine-tuning run needs the signal most).
+        # Returns a positive value; use with a NEGATIVE weight.
         # target_joint_pos and joint_weights set per-robot in env_cfgs.py (HOME pose).
         "post_standing_posture": RewardTermCfg(
-            func=mdp.standing_posture, weight=12.0,
-            params={"target_joint_pos": {}, "joint_weights": {}, "kp": 1.5,
-                    "pelvis_height_threshold": 0.65, "band": 0.08,
+            func=mdp.home_pose_l2, weight=-3.0,
+            params={"target_joint_pos": {}, "joint_weights": {},
+                    "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Both-feet grounded reward: 0.5 for one foot, 1.0 for both. Directly penalizes

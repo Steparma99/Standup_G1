@@ -1230,6 +1230,7 @@ def style_feet_stumble(
 # 1(h_base > H_STAGE2) and is zero until the robot is actually standing.
 
 _POST_UPPER_CACHE_ATTR = "_post_upper_body_cache"
+_HOME_L2_CACHE_ATTR = "_home_l2_cache"
 
 
 def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.06) -> torch.Tensor:
@@ -1241,6 +1242,45 @@ def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 
     """
     h = asset.data.root_link_pos_w[:, 2]
     return _standing_gate(h, height_threshold, band=band)
+
+
+def home_pose_l2(
+    env: ManagerBasedRlEnv,
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    height_threshold: float = H_STAGE2,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """L2 penalty toward HOME pose, gated to standing [B,].
+
+    Returns Σ w·(q − q_HOME)², a NON-NEGATIVE value — use with a NEGATIVE weight.
+
+    Unlike standing_posture() which uses exp(−kp·err) and has a near-zero gradient
+    when the robot is far from HOME (the signal dies exactly when needed most), this
+    function returns the raw weighted squared error. The gradient is proportional to
+    (q − q_HOME) at ALL distances — it never saturates or dies. This makes it the
+    right choice when fine-tuning a policy that already has a wrong posture: the pull
+    toward HOME is constant regardless of how far off the current stance is.
+
+    target_joint_pos and joint_weights are {regex: value} dicts resolved once (cached)
+    against the robot's joint names. Joints absent from joint_weights get weight 0
+    and are not penalised. Set per-robot in env_cfgs.py.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = getattr(env, _HOME_L2_CACHE_ATTR, None)
+    if cache is None:
+        names = asset.joint_names
+        tgt = torch.tensor(
+            [resolve_expr(target_joint_pos or {}, names, 0.0)], device=env.device
+        )
+        w = torch.tensor(
+            [resolve_expr(joint_weights or {}, names, 0.0)], device=env.device
+        )
+        cache = {"tgt": tgt, "w": w}
+        setattr(env, _HOME_L2_CACHE_ATTR, cache)
+    err = asset.data.joint_pos - cache["tgt"]          # [B, J]
+    metric = torch.sum(cache["w"] * err.pow(2), dim=1) # [B]
+    return metric * _post_gate(asset, height_threshold)
 
 
 def post_base_ang_vel(

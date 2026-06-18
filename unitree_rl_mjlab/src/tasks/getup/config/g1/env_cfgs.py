@@ -330,10 +330,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "waist_.*": 1.0,
     }
 
-    # Full-body HOME pose tracking (replaces arm-only post_upper_body_posture).
-    # Leg joints carry high weight to fix asymmetric stance and legs-one-over-other.
-    # Waist carries high weight to fix crooked torso.
-    # Arms carry moderate weight to stop random flailing without fighting the rise.
+    # Full-body HOME pose L2 penalty (replaces exp-form standing_posture).
+    # Direct quadratic penalty: constant gradient at any distance from HOME.
+    # Leg joints highest weight (fix asymmetric stance / legs-one-over-other).
+    # Waist high weight (fix crooked torso). Arms moderate (stop random flailing).
     cfg.rewards["post_standing_posture"].params["target_joint_pos"] = dict(
         HOME_KEYFRAME.joint_pos
     )
