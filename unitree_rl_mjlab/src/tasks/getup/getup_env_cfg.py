@@ -677,7 +677,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # rise, only straightens the torso as the robot approaches standing.
         "style_waist_upright": RewardTermCfg(
             func=mdp.joint_group_deviation,
-            weight=-4.0,
+            weight=-8.0,
             params={"lower": -0.25, "upper": 0.25, "gate_lo": 0.62, "band": 0.08,
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
@@ -773,7 +773,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # rise (the global joint_vel_l2 above is too weak to constrain the arms, and the
         # only arm-posture term is gated to standing). Reuses the shared joint_vel_l2.
         "reg_arm_vel": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=-3e-3,
+            func=mdp.joint_vel_l2, weight=-8e-3,
             params={"asset_cfg": SceneEntityCfg(
                 "robot", joint_names=(".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"))},
         ),
@@ -830,12 +830,29 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.post_base_height, weight=10.0,
             params={"target_height": 0.80, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Soft (-0.1) default arm/waist posture; target + mask set per-robot (HOME pose).
+        # arm-only posture disabled: full-body HOME tracking is handled by post_standing_posture.
         "post_upper_body_posture": RewardTermCfg(
-            func=mdp.post_upper_body_posture, weight=10.0,
-            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.25,
-                    "height_threshold": 0.65,  # only shape arms once fully standing
+            func=mdp.post_upper_body_posture, weight=0.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.5,
+                    "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Full-body HOME pose tracking gated to standing (h_pelvis > 0.65 m).
+        # Covers legs (high weight: fix asymmetric stance / legs-one-over-other),
+        # waist (fix crooked torso), and arms (stop random movement).
+        # target_joint_pos and joint_weights set per-robot in env_cfgs.py (HOME pose).
+        "post_standing_posture": RewardTermCfg(
+            func=mdp.standing_posture, weight=12.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "kp": 1.5,
+                    "pelvis_height_threshold": 0.65, "band": 0.08,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Both-feet grounded reward: 0.5 for one foot, 1.0 for both. Directly penalizes
+        # the one-foot balancing behaviour. site_names set per-robot in env_cfgs.py.
+        "post_stand_on_feet": RewardTermCfg(
+            func=mdp.stand_on_feet, weight=5.0,
+            params={"sensor_name": "feet_ground_contact",
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
         "post_feet_parallel": RewardTermCfg(
             func=mdp.post_feet_parallel, weight=2.5,

@@ -69,7 +69,7 @@ _BETA_CURRICULUM_ENABLE   = True
 _BETA_INITIAL             = 1.0
 _BETA_DECREMENT           = 0.02   # removed per successful episode (per env)
 _BETA_MIN                 = 0.25   # floor (HoST fixed-beta ablation value)
-_BETA_SUCCESS_HEAD_HEIGHT = 1.0    # torso_link (head proxy) height counting as "stood up"
+_BETA_SUCCESS_HEAD_HEIGHT = 0.90   # torso_link (head proxy) height counting as "stood up"
 
 # ---------------------------------------------------------------------------
 # Reset drop + settling phase.
@@ -329,6 +329,32 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_wrist_.*": 1.0,
         "waist_.*": 1.0,
     }
+
+    # Full-body HOME pose tracking (replaces arm-only post_upper_body_posture).
+    # Leg joints carry high weight to fix asymmetric stance and legs-one-over-other.
+    # Waist carries high weight to fix crooked torso.
+    # Arms carry moderate weight to stop random flailing without fighting the rise.
+    cfg.rewards["post_standing_posture"].params["target_joint_pos"] = dict(
+        HOME_KEYFRAME.joint_pos
+    )
+    cfg.rewards["post_standing_posture"].params["joint_weights"] = {
+        # Legs — main fix for asymmetric / one-legged stance
+        ".*_hip_pitch_joint": 3.0,
+        ".*_hip_roll_joint": 3.0,   # "legs one over other" is a hip-roll deviation
+        ".*_hip_yaw_joint": 2.0,
+        ".*_knee_joint": 3.0,
+        ".*_ankle_pitch_joint": 2.0,
+        ".*_ankle_roll_joint": 1.0,
+        # Waist — fix crooked torso
+        "waist_.*": 2.0,
+        # Arms — stop random movement; HOME sets shoulder_pitch/roll + elbow targets
+        ".*_shoulder_.*": 1.5,
+        ".*_elbow_joint": 1.5,
+        ".*_wrist_.*": 0.5,
+    }
+
+    # Both-feet grounded: needs the foot site names to check height.
+    cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
 
     # Domain randomization: mass offset on torso, friction on feet.
     cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
