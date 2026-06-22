@@ -64,6 +64,7 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "post_standing_posture": "post_task",
     "post_stand_on_feet": "post_task",
     "post_feet_parallel": "post_task",
+    "post_feet_yaw": "post_task",
     "stable_success_hold": "post_task",
 }
 
