@@ -1385,6 +1385,24 @@ def post_feet_parallel(
     return torch.exp(-scale * diff) * _post_gate(asset, height_threshold)
 
 
+def post_feet_yaw(
+    env: ManagerBasedRlEnv,
+    scale: float = 10.0,
+    height_threshold: float = H_STAGE2,
+    joint_names: tuple[str, ...] = ("left_hip_yaw_joint", "right_hip_yaw_joint"),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task feet yaw alignment: exp(-scale·(q_yawL² + q_yawR²))·1(h>H_STAGE2) [B,].
+
+    Both feet point straight forward when hip_yaw=0. Decays when the robot toes
+    out or in after standing. Peak reward = 1.0 when both hip_yaw = 0.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = _cached_joint_ids(env, asset, joint_names, "_post_feet_yaw_joint_ids")
+    q = asset.data.joint_pos[:, ids]  # [B, 2]
+    return torch.exp(-scale * q.pow(2).sum(dim=1)) * _post_gate(asset, height_threshold)
+
+
 _JOINT_VEL_LIMIT_CACHE = "_joint_vel_limit_cache"
 
 

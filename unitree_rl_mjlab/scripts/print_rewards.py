@@ -48,6 +48,7 @@ DEFAULT_TAGS = [
     "Episode_Reward/style_shoulder_roll_deviation", # should be near 0 (limit widened to ±0.4)
     "Episode_Reward/post_base_height",              # should be near +10 (target fixed to 0.80m)
     "Episode_Reward/post_feet_parallel",            # should be near +2.5 (clip_min fixed)
+    "Episode_Reward/post_feet_yaw",                 # should be near +2.5 (toes forward); new reward
     # --- posture_v1: full-body HOME tracking + both-feet grounded ---
     "Episode_Reward/post_standing_posture",  # full-body HOME L2 penalty (weight=-3); near 0 when at HOME, grows negative when crooked
     "Episode_Reward/post_stand_on_feet",     # both-feet contact (weight=5); near +5 when fully grounded

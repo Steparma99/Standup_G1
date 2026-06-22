@@ -643,13 +643,14 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={"asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
-        # Head height: f_tol(h_head, [1, inf), margin=1, value=0.1). h_head uses
+        # Head height: f_tol(h_head, [lower, inf), margin=1, value=0.1). h_head uses
         # torso_link as a proxy (no separate head body); set per-robot (env_cfgs.py).
+        # lower=0.80: torso_link body origin at HOME (pelvis 0.757 + waist_roll offset 0.044).
         "task_head_height": RewardTermCfg(
             func=mdp.task_head_height,
             weight=1.0,
             params={
-                "lower": 1.0,
+                "lower": 0.80,
                 "margin": 1.0,
                 "value_at_margin": 0.1,
                 "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot (torso_link).
@@ -701,10 +702,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # CoM-in-support; weight 2.5 per foot (function sums both feet). Active > Stage 2.
+        # clip_min=0.0: allows reward to reach exp(0)=1.0/foot when feet are centered under pelvis.
         "style_foot_displacement": RewardTermCfg(
             func=mdp.style_foot_displacement,
             weight=2.5,
-            params={"scale": 2.0, "clip_min": 0.3,
+            params={"scale": 2.0, "clip_min": 0.0,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},  # Set per-robot.
         ),
         "style_foot_distance": RewardTermCfg(
@@ -828,7 +830,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Base height target 0.7 m (flat ground); tight Gaussian (-20).
         "post_base_height": RewardTermCfg(
             func=mdp.post_base_height, weight=10.0,
-            params={"target_height": 0.80, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={"target_height": 0.757, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # arm-only posture disabled: full-body HOME tracking is handled by post_standing_posture.
         "post_upper_body_posture": RewardTermCfg(
@@ -860,6 +862,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "post_feet_parallel": RewardTermCfg(
             func=mdp.post_feet_parallel, weight=2.5,
             params={"scale": 20.0, "clip_min": 0.001, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Feet yaw alignment: exp(-10·(q_yawL²+q_yawR²)); peak when both hip_yaw=0 (toes fwd).
+        "post_feet_yaw": RewardTermCfg(
+            func=mdp.post_feet_yaw, weight=2.5,
+            params={"scale": 10.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Explicit bonus for holding the stand (not just touching it for a frame).
         # Also the only writer of episode_state["ever_stood"]/["standing_counter"],

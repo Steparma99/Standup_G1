@@ -275,15 +275,15 @@ G1_ACTUATOR_HOST_ARM = BuiltinPositionActuatorCfg(
 ##
 
 HOME_KEYFRAME = EntityCfg.InitialStateCfg(
-  pos=(0, 0, 0.8),
+  pos=(0, 0, 0.757),
   joint_pos={
-    ".*_hip_pitch_joint": -0.1,
-    ".*_knee_joint": 0.3,
-    ".*_ankle_pitch_joint": -0.2,
-    ".*_shoulder_pitch_joint": 0.35,
-    ".*_elbow_joint": 0.87,
-    "left_shoulder_roll_joint": 0.18,
-    "right_shoulder_roll_joint": -0.18,
+    ".*_hip_pitch_joint": -0.312,
+    ".*_knee_joint": 0.669,
+    ".*_ankle_pitch_joint": -0.363,
+    ".*_shoulder_pitch_joint": 0.20,
+    ".*_elbow_joint": 0.60,
+    "left_shoulder_roll_joint": 0.20,
+    "right_shoulder_roll_joint": -0.20,
   },
   joint_vel={".*": 0.0},
 )

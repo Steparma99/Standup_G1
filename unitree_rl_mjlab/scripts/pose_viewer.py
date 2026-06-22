@@ -19,10 +19,12 @@ KEYS (inside the viewer window):
     G   toggle COLLISION geoms (group 3) on/off  (see hand/head/foot capsules)
     0   reset to the loaded keyframe (undo your edits)
     C   print current pos/rot   (copy these into g1_constants.py)
+    J   print joint positions + reward diagnostics (see below)
     mouse = orbit / zoom camera
 
-After every edit it prints base_z and projected_gravity_b_z
-(0 = lying flat, -1 = upright, +1 = upside down).
+After every edit it prints base_z, projected_gravity_b_z, foot heights, and
+ankle tilt metric (reward-relevant values). Press J for full joint list +
+computed reward values.
 
 Usage:
     # interactive 3D window:
@@ -69,8 +71,44 @@ POSES = {
 }
 
 ROT_STEP_DEG = 5.0
-Z_STEP = 0.01
+Z_STEP = 0.001
 
+# ---------------------------------------------------------------------------
+# Reward parameter constants — keep in sync with getup_env_cfg.py / rewards.py
+# ---------------------------------------------------------------------------
+_POST_BASE_HEIGHT_TARGET = 0.757   # getup_env_cfg.py post_base_height target_height
+_POST_BASE_HEIGHT_SCALE  = 20.0   # getup_env_cfg.py post_base_height scale
+_POST_BASE_HEIGHT_WEIGHT = 10.0   # getup_env_cfg.py post_base_height weight
+_ANKLE_PARALLEL_THR      = 0.05   # getup_env_cfg.py style_ankle_parallel tilt_threshold
+_ANKLE_PARALLEL_REWARD   = 20.0   # getup_env_cfg.py style_ankle_parallel reward
+_POST_FEET_PAR_SCALE     = 20.0   # getup_env_cfg.py post_feet_parallel scale
+_POST_FEET_PAR_CLIP_MIN  = 0.001  # getup_env_cfg.py post_feet_parallel clip_min
+_POST_FEET_PAR_WEIGHT    = 2.5    # getup_env_cfg.py post_feet_parallel weight
+_POST_ORI_SCALE          = 8.0    # getup_env_cfg.py post_base_orientation scale
+_POST_ORI_WEIGHT         = 10.0   # getup_env_cfg.py post_base_orientation weight
+_WAIST_LOWER             = -0.25  # getup_env_cfg.py style_waist_upright lower
+_WAIST_UPPER             = 0.25   # getup_env_cfg.py style_waist_upright upper
+_WAIST_WEIGHT            = -8.0   # getup_env_cfg.py style_waist_upright weight (negative)
+_SHANK_ORI_LOWER         = 0.8    # getup_env_cfg.py style_shank_orientation lower
+_SHANK_ORI_MARGIN        = 1.0    # getup_env_cfg.py style_shank_orientation margin
+_SHANK_ORI_VAL_AT_MARGIN = 0.1   # getup_env_cfg.py style_shank_orientation value_at_margin
+_SHANK_ORI_WEIGHT        = 10.0   # getup_env_cfg.py style_shank_orientation weight
+_POST_GATE_THRESHOLD     = 0.65   # rewards.py H_STAGE2
+_POST_GATE_BAND          = 0.06   # rewards.py _post_gate band
+_TASK_HEAD_HEIGHT_LOWER  = 0.80   # getup_env_cfg.py task_head_height lower (torso_link z at HOME)
+_TASK_HEAD_HEIGHT_MARGIN = 1.0    # getup_env_cfg.py task_head_height margin
+_TASK_HEAD_HEIGHT_VAM    = 0.1    # getup_env_cfg.py task_head_height value_at_margin
+_TASK_HEAD_HEIGHT_WEIGHT = 1.0    # getup_env_cfg.py task_head_height weight
+_FOOT_DISP_SCALE         = 2.0    # getup_env_cfg.py style_foot_displacement scale
+_FOOT_DISP_CLIP_MIN      = 0.0    # getup_env_cfg.py style_foot_displacement clip_min
+_FOOT_DISP_WEIGHT        = 2.5    # getup_env_cfg.py style_foot_displacement weight
+_FEET_YAW_SCALE          = 10.0   # getup_env_cfg.py post_feet_yaw scale
+_FEET_YAW_WEIGHT         = 2.5    # getup_env_cfg.py post_feet_yaw weight
+
+
+# ---------------------------------------------------------------------------
+# Geometry helpers (raw MuJoCo, no env/sensor layer)
+# ---------------------------------------------------------------------------
 
 def joint_name_to_qposadr(model):
     out = {}
@@ -87,14 +125,175 @@ def free_joint_qposadr(model):
     return None
 
 
-def projected_gravity_z(quat) -> float:
+def _rotmat_from_quat(quat) -> np.ndarray:
+    """Return 3×3 rotation matrix (body→world) from quaternion (w,x,y,z)."""
     rotmat = np.zeros(9)
     mujoco.mju_quat2Mat(rotmat, np.asarray(quat, dtype=float))
-    return float((rotmat.reshape(3, 3).T @ np.array([0.0, 0.0, -1.0]))[2])
+    return rotmat.reshape(3, 3)
 
+
+def projected_gravity_z(quat) -> float:
+    return float((_rotmat_from_quat(quat).T @ np.array([0.0, 0.0, -1.0]))[2])
+
+
+def _proj_gravity(quat) -> np.ndarray:
+    """Gravity [0,0,-1] in body frame; shape (3,)."""
+    return _rotmat_from_quat(quat).T @ np.array([0.0, 0.0, -1.0])
+
+
+def _body_xquat(model, data, name) -> np.ndarray:
+    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+    return data.xquat[bid].copy() if bid >= 0 else np.array([1., 0., 0., 0.])
+
+
+def _body_xpos(model, data, name) -> np.ndarray:
+    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+    return data.xpos[bid].copy() if bid >= 0 else np.zeros(3)
+
+
+def _site_xpos(model, data, name) -> np.ndarray:
+    sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
+    return data.site_xpos[sid].copy() if sid >= 0 else np.zeros(3)
+
+
+def _foot_heights(model, data) -> tuple[float, float]:
+    """Z of left and right foot sites (world frame; ~0 when touching floor)."""
+    zL = float(_site_xpos(model, data, "left_foot")[2])
+    zR = float(_site_xpos(model, data, "right_foot")[2])
+    return zL, zR
+
+
+def _ankle_tilt(model, data) -> tuple[float, float]:
+    """Per-foot tilt metric ||proj_grav_xy||² (0=flat, grows with tilt)."""
+    tilts = []
+    for name in ("left_ankle_roll_link", "right_ankle_roll_link"):
+        g = _proj_gravity(_body_xquat(model, data, name))
+        tilts.append(float(g[0] ** 2 + g[1] ** 2))
+    return tilts[0], tilts[1]
+
+
+def _shank_cos(model, data) -> tuple[float, float]:
+    """Vertical component of the knee→ankle unit vector per leg (1=vertical shank)."""
+    cosines = []
+    for side in ("left", "right"):
+        knee = _body_xpos(model, data, f"{side}_knee_link")
+        ankle = _body_xpos(model, data, f"{side}_ankle_roll_link")
+        vec = knee - ankle
+        cosines.append(float(vec[2] / (np.linalg.norm(vec) + 1e-6)))
+    return cosines[0], cosines[1]
+
+
+def _f_tol(x: float, lower: float, margin: float, value_at_margin: float) -> float:
+    """Gaussian tolerance (one-sided lower bound, upper=inf)."""
+    if x >= lower:
+        return 1.0
+    d = (lower - x) / margin
+    scale = math.sqrt(-2.0 * math.log(value_at_margin))
+    return math.exp(-0.5 * (d * scale) ** 2)
+
+
+def _post_gate(h: float) -> float:
+    """Smooth post-task gate [0,1]: ramps from 0→1 over [0.59, 0.71] m."""
+    return min(max((h - (_POST_GATE_THRESHOLD - _POST_GATE_BAND)) / (2.0 * _POST_GATE_BAND), 0.0), 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Reward diagnostics printer
+# ---------------------------------------------------------------------------
+
+def _print_reward_diagnostics(model, data, joint_adr, base_quat, base_pos: np.ndarray) -> None:
+    """Compute and print reward values for the current pose (matching training params)."""
+    base_z = float(base_pos[2])
+    gate = _post_gate(base_z)
+
+    # task_head_height (torso_link proxy; always active, no gate)
+    torso_z = float(_body_xpos(model, data, "torso_link")[2])
+    head_rwd = _f_tol(torso_z, _TASK_HEAD_HEIGHT_LOWER, _TASK_HEAD_HEIGHT_MARGIN, _TASK_HEAD_HEIGHT_VAM) * _TASK_HEAD_HEIGHT_WEIGHT
+    print(f"  task_head_height     : torso_link_z={torso_z:.4f}  lower={_TASK_HEAD_HEIGHT_LOWER:.2f}  "
+          f"→ reward={head_rwd:+.3f}  (no gate, weight={_TASK_HEAD_HEIGHT_WEIGHT})")
+
+    # post_base_height
+    h_err = base_z - _POST_BASE_HEIGHT_TARGET
+    h_rwd = math.exp(-_POST_BASE_HEIGHT_SCALE * h_err ** 2) * _POST_BASE_HEIGHT_WEIGHT * gate
+    print(f"  post_base_height     : pelvis_z={base_z:+.3f} m  target={_POST_BASE_HEIGHT_TARGET:.3f}  "
+          f"err={h_err:+.4f}  → reward={h_rwd:+.2f}  (gate={gate:.2f}, weight={_POST_BASE_HEIGHT_WEIGHT})")
+
+    # post_base_orientation
+    g_base = _proj_gravity(base_quat)
+    theta_xy_sq = float(g_base[0] ** 2 + g_base[1] ** 2)
+    ori_rwd = math.exp(-_POST_ORI_SCALE * theta_xy_sq) * _POST_ORI_WEIGHT * gate
+    print(f"  post_base_orientation: ||theta_xy||²={theta_xy_sq:.4f}  "
+          f"→ reward={ori_rwd:+.2f}  (gate={gate:.2f}, weight={_POST_ORI_WEIGHT})")
+
+    # style_ankle_parallel (NO gate — fires at all heights)
+    tL, tR = _ankle_tilt(model, data)
+    mean_tilt = (tL + tR) / 2.0
+    ankle_rwd = _ANKLE_PARALLEL_REWARD * math.exp(-mean_tilt / (2.0 * _ANKLE_PARALLEL_THR))
+    print(f"  style_ankle_parallel : tilt_L={tL:.4f}  tilt_R={tR:.4f}  mean={mean_tilt:.4f}  "
+          f"(thr={_ANKLE_PARALLEL_THR})  → reward={ankle_rwd:+.2f}  (no gate)")
+
+    # style_foot_displacement (CoM-in-support; gated above H_STAGE2)
+    base_xy = base_pos[:2]
+    fL = _site_xpos(model, data, "left_foot")[:2]
+    fR = _site_xpos(model, data, "right_foot")[:2]
+    d2L = float(np.sum((fL - base_xy) ** 2))
+    d2R = float(np.sum((fR - base_xy) ** 2))
+    cd2L = max(d2L, _FOOT_DISP_CLIP_MIN)
+    cd2R = max(d2R, _FOOT_DISP_CLIP_MIN)
+    rL = math.exp(-_FOOT_DISP_SCALE * cd2L)
+    rR = math.exp(-_FOOT_DISP_SCALE * cd2R)
+    foot_disp_rwd = (rL + rR) * _FOOT_DISP_WEIGHT * gate
+    print(f"  style_foot_disp      : L d²={d2L:.4f}→clamp={cd2L:.4f}→exp={rL:.4f}  "
+          f"R d²={d2R:.4f}→clamp={cd2R:.4f}→exp={rR:.4f}  "
+          f"→ reward={foot_disp_rwd:+.3f}  (gate={gate:.2f}, max={(2*_FOOT_DISP_WEIGHT):+.1f})")
+
+    # post_feet_parallel
+    zL, zR = _foot_heights(model, data)
+    diff = max(abs(zL - zR), _POST_FEET_PAR_CLIP_MIN)
+    feet_par_rwd = math.exp(-_POST_FEET_PAR_SCALE * diff) * _POST_FEET_PAR_WEIGHT * gate
+    print(f"  post_feet_parallel   : foot_z_L={zL:+.4f}  foot_z_R={zR:+.4f}  "
+          f"|diff|={diff:.4f} (clip={_POST_FEET_PAR_CLIP_MIN})  "
+          f"→ reward={feet_par_rwd:+.2f}  (gate={gate:.2f}, weight={_POST_FEET_PAR_WEIGHT})")
+
+    # post_feet_yaw (hip yaw = 0 → toes forward)
+    yL = float(data.qpos[joint_adr["left_hip_yaw_joint"]]) if "left_hip_yaw_joint" in joint_adr else 0.0
+    yR = float(data.qpos[joint_adr["right_hip_yaw_joint"]]) if "right_hip_yaw_joint" in joint_adr else 0.0
+    feet_yaw_rwd = math.exp(-_FEET_YAW_SCALE * (yL ** 2 + yR ** 2)) * _FEET_YAW_WEIGHT * gate
+    print(f"  post_feet_yaw        : yaw_L={yL:+.4f} rad  yaw_R={yR:+.4f} rad  "
+          f"sum_sq={yL**2+yR**2:.5f}  → reward={feet_yaw_rwd:+.3f}  "
+          f"(gate={gate:.2f}, max={_FEET_YAW_WEIGHT:+.1f})")
+
+    # style_waist_upright (gate_lo=0.62, band=0.08 from getup_env_cfg.py)
+    waist_gate_lo, waist_band = 0.62, 0.08
+    waist_gate = min(max((base_z - (waist_gate_lo - waist_band)) / (2.0 * waist_band), 0.0), 1.0)
+    wp = float(data.qpos[joint_adr["waist_pitch_joint"]]) if "waist_pitch_joint" in joint_adr else 0.0
+    wr = float(data.qpos[joint_adr["waist_roll_joint"]]) if "waist_roll_joint" in joint_adr else 0.0
+    over_p = max(wp - _WAIST_UPPER, 0.0) + max(_WAIST_LOWER - wp, 0.0)
+    over_r = max(wr - _WAIST_UPPER, 0.0) + max(_WAIST_LOWER - wr, 0.0)
+    waist_pen = _WAIST_WEIGHT * (over_p ** 2 + over_r ** 2) * waist_gate  # weight is negative
+    print(f"  style_waist_upright  : pitch={wp:+.3f}  roll={wr:+.3f}  "
+          f"band=[{_WAIST_LOWER},{_WAIST_UPPER}]  "
+          f"→ penalty={waist_pen:+.4f}  (gate={waist_gate:.2f}, weight={_WAIST_WEIGHT})")
+
+    # style_shank_orientation (gated above H_STAGE1=0.45)
+    shank_gate = min(max((base_z - (0.45 - 0.08)) / (2.0 * 0.08), 0.0), 1.0)
+    cos_L, cos_R = _shank_cos(model, data)
+    mean_cos = (cos_L + cos_R) / 2.0
+    shank_rwd = _f_tol(mean_cos, _SHANK_ORI_LOWER, _SHANK_ORI_MARGIN, _SHANK_ORI_VAL_AT_MARGIN) * _SHANK_ORI_WEIGHT * shank_gate
+    print(f"  style_shank_orient   : cos_L={cos_L:.3f}  cos_R={cos_R:.3f}  mean={mean_cos:.3f}  "
+          f"(lower={_SHANK_ORI_LOWER})  → reward={shank_rwd:+.2f}  (gate={shank_gate:.2f}, weight={_SHANK_ORI_WEIGHT})")
+
+    print(f"  ── post_gate @ h={base_z:.3f} m = {gate:.3f}  "
+          f"({'ACTIVE' if gate > 0.95 else 'PARTIAL' if gate > 0.05 else 'OFF'})")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="headless: print all poses and exit")
     parser.add_argument("--start", default="SUPINE", help="pose to start on")
     parser.add_argument("--collision", action="store_true",
@@ -128,9 +327,16 @@ def main() -> None:
         mujoco.mj_forward(model, data)
 
     def report():
-        print(f"    base_z = {st['pos'][2]:+.3f} m   "
-              f"projected_gravity_b_z = {projected_gravity_z(st['quat']):+.3f}  "
-              f"(0=flat, -1=upright, +1=upside-down)")
+        base_z = st["pos"][2]
+        grav_z = projected_gravity_z(st["quat"])
+        zL, zR = _foot_heights(model, data)
+        tL, tR = _ankle_tilt(model, data)
+        mean_tilt = (tL + tR) / 2.0
+        gate = _post_gate(base_z)
+        print(f"    base_z={base_z:+.3f} m  grav_z={grav_z:+.3f}  (0=flat,-1=upright)  "
+              f"post_gate={gate:.2f}")
+        print(f"    foot_z_L={zL:+.5f}  foot_z_R={zR:+.5f}  ankle_tilt={mean_tilt:.4f}  "
+              f"(0=flat,>0.05=crooked)")
 
     def load_keyframe(label, kf):
         st["label"], st["kf"] = label, kf
@@ -139,13 +345,13 @@ def main() -> None:
         st["joints"] = dict(getattr(kf, "joint_pos", {}) or {})
         st["paused"] = True
         write_pose_to_data()
-        print(f"--> loaded {label}  (paused; edit W/S A/D Q/E Z/X, P=test, 0=reset, C=print)")
+        print(f"--> loaded {label}  (paused; edit W/S A/D Q/E Z/X, P=test, 0=reset, C=print, J=rewards)")
         report()
 
     # Headless check: print every pose and exit.
     if args.check:
         for _, (label, kf) in POSES.items():
-            print(f"[{label}]")
+            print(f"\n[{label}]")
             load_keyframe(label, kf)
         return
 
@@ -174,6 +380,17 @@ def main() -> None:
         print(f"      pos=({px:.3f}, {py:.3f}, {pz:.3f}),")
         print(f"      rot=({w:.4f}, {x:.4f}, {y:.4f}, {z:.4f}),")
 
+    def print_joints_and_rewards():
+        print("\n    ---- joint positions (copy into g1_constants.py) ----")
+        print('    joint_pos={')
+        for jname in sorted(joint_adr):
+            val = float(data.qpos[joint_adr[jname]])
+            if abs(val) > 1e-6:  # skip near-zero joints
+                print(f'      "{jname}": {val:.4f},')
+        print('    }')
+        print("\n    ---- reward diagnostics (params from env_cfgs.py) ----")
+        _print_reward_diagnostics(model, data, joint_adr, st["quat"], st["pos"])
+
     actions = {
         ord("W"): lambda: rotate_world((0, 1, 0), +ROT_STEP_DEG),
         ord("S"): lambda: rotate_world((0, 1, 0), -ROT_STEP_DEG),
@@ -184,6 +401,7 @@ def main() -> None:
         ord("Z"): lambda: shift_z(-Z_STEP),
         ord("X"): lambda: shift_z(+Z_STEP),
         ord("C"): print_values,
+        ord("J"): print_joints_and_rewards,
         ord("0"): lambda: load_keyframe(st["label"], st["kf"]),
     }
 

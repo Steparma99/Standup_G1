@@ -158,7 +158,7 @@ def ankle_parallel_verification(env: ManagerBasedRlEnv) -> None:
     roll_ids = [k for k, n in enumerate(names) if "ankle_roll" in n]
 
     def sweep(joint_ids, label):
-        print(f"\n=== ANKLE PARALLEL — HOME sweep tilting ankle {label} (threshold={threshold}) ===")
+        #print(f"\n=== ANKLE PARALLEL — HOME sweep tilting ankle {label} (threshold={threshold}) ===")
         st = PrettyTable()
         st.field_names = [f"{label} (rad)", "deg", "tilt_metric", "reward"]
         st.align = "r"
