@@ -679,7 +679,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "style_waist_upright": RewardTermCfg(
             func=mdp.joint_group_deviation,
             weight=-8.0,
-            params={"lower": -0.25, "upper": 0.25, "gate_lo": 0.62, "band": 0.08,
+            params={"lower": -0.25, "upper": 0.25, "gate_lo": 0.65, "band": 0.08,
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
         ),
@@ -755,9 +755,9 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_acc_l2, weight=0, # -2.5e-7,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-4e-3),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=0),
         # Smoothness = second action difference ||a_t - 2 a_{t-1} + a_{t-2}||².
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-4e-3),
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=0),
         "joint_torques_l2": RewardTermCfg(
             func=mdp.joint_torques_l2, weight=0, #-2.5e-6,
             params={"asset_cfg": SceneEntityCfg("robot")},
@@ -768,14 +768,14 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         "joint_vel_l2": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=-2e-4,
+            func=mdp.joint_vel_l2, weight=0,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         # Arm-specific velocity penalty: calms shoulder/elbow/wrist flailing during the
         # rise (the global joint_vel_l2 above is too weak to constrain the arms, and the
         # only arm-posture term is gated to standing). Reuses the shared joint_vel_l2.
         "reg_arm_vel": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=-8e-3,
+            func=mdp.joint_vel_l2, weight=0,
             params={"asset_cfg": SceneEntityCfg(
                 "robot", joint_names=(".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"))},
         ),
@@ -785,7 +785,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # to -2.5e-2 — still a meaningful effort penalty but no longer pinning the
         # arms in place now that the arm PD gains are responsive (Kp=100).
         "joint_tracking_error": RewardTermCfg(
-            func=mdp.joint_tracking_error, weight=-2.5e-2,
+            func=mdp.joint_tracking_error, weight=0,
             params={"action_name": "joint_pos", "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Hard-wall joint position limit penalty (very high coefficient).

@@ -477,7 +477,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Default parallel environments for training. Override on the CLI with
         # --env.scene.num-envs. (Episode horizon is 500 steps: episode_length_s=10.0
         # at decimation=4 x 0.005s = 0.02s control period.)
-        cfg.scene.num_envs = 1024
+        cfg.scene.num_envs = 4096
 
     if play:
         cfg.episode_length_s = int(1e9)

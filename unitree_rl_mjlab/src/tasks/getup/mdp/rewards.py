@@ -1011,11 +1011,12 @@ def style_waist_yaw_deviation(
     penalty: float = -10.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Binary: penalty if |q_waist_yaw| > limit (HoST waist deviation) [B,]."""
+    """Binary: penalty if |q_waist_yaw| > limit (HoST waist deviation) [B,]. Gated h>H_STAGE2."""
     asset: Entity = env.scene[asset_cfg.name]
     q = asset.data.joint_pos[:, asset_cfg.joint_ids]  # [B, n]
     viol = (q.abs() > limit).any(dim=1).float()
-    return penalty * viol
+    h = asset.data.root_link_pos_w[:, 2]
+    return penalty * viol * _standing_gate(h, H_STAGE2)
 
 
 def style_hip_deviation(
@@ -1037,7 +1038,8 @@ def style_hip_deviation(
     q_yaw = asset.data.joint_pos[:, yaw_ids].abs()  # [B, 2]
     roll_viol = (q_roll.max(dim=1).values > roll_limit).float()
     yaw_viol = (q_yaw.min(dim=1).values > yaw_limit).float()
-    return penalty * roll_viol + penalty * yaw_viol
+    h = asset.data.root_link_pos_w[:, 2]
+    return (penalty * roll_viol + penalty * yaw_viol) * _standing_gate(h, H_STAGE2)
 
 
 def style_knee_deviation(
@@ -1056,7 +1058,8 @@ def style_knee_deviation(
     q = asset.data.joint_pos[:, asset_cfg.joint_ids]  # [B, 2]
     hi_viol = (q.max(dim=1).values > hi_limit).float()
     lo_viol = (q.min(dim=1).values < lo_limit).float()
-    return penalty * hi_viol + penalty * lo_viol
+    h = asset.data.root_link_pos_w[:, 2]
+    return (penalty * hi_viol + penalty * lo_viol) * _standing_gate(h, H_STAGE2)
 
 
 def style_shoulder_roll_deviation(
@@ -1078,7 +1081,8 @@ def style_shoulder_roll_deviation(
     q = asset.data.joint_pos[:, ids]  # [B, 2] -> [:, 0]=left, [:, 1]=right
     left_viol = (q[:, 0] < left_limit).float()
     right_viol = (q[:, 1] > right_limit).float()
-    return penalty * left_viol + penalty * right_viol
+    h = asset.data.root_link_pos_w[:, 2]
+    return (penalty * left_viol + penalty * right_viol) * _standing_gate(h, H_STAGE2)
 
 
 def style_foot_displacement(
@@ -1118,7 +1122,8 @@ def style_foot_distance(
     asset: Entity = env.scene[asset_cfg.name]
     pos = asset.data.site_pos_w[:, asset_cfg.site_ids, :2]  # [B, 2, 2]
     d2 = (pos[:, 0] - pos[:, 1]).pow(2).sum(dim=-1)  # [B]
-    return penalty * (d2 > max_dist_sq).float()
+    h = asset.data.root_link_pos_w[:, 2]
+    return penalty * (d2 > max_dist_sq).float() * _standing_gate(h, H_STAGE2)
 
 
 def style_shank_orientation(
@@ -1195,7 +1200,8 @@ def style_ankle_parallel(
     g = asset.data.gravity_vec_w.unsqueeze(1).expand(-1, quat.shape[1], -1)  # [B, 2, 3]
     pg = quat_apply_inverse(quat, g)  # [B, 2, 3]
     tilt = pg[..., :2].pow(2).sum(dim=-1).mean(dim=1)  # [B]; 0 flat -> grows with tilt
-    return reward * torch.exp(-tilt / (2 * tilt_threshold))
+    h = asset.data.root_link_pos_w[:, 2]
+    return reward * torch.exp(-tilt / (2 * tilt_threshold)) * _standing_gate(h, H_STAGE1)
 
 
 def style_feet_stumble(
