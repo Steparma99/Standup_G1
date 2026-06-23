@@ -756,9 +756,9 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_acc_l2, weight=0, # -2.5e-7,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=0),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-2e-3),
         # Smoothness = second action difference ||a_t - 2 a_{t-1} + a_{t-2}||².
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=0),
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-2e-3),
         "joint_torques_l2": RewardTermCfg(
             func=mdp.joint_torques_l2, weight=0, #-2.5e-6,
             params={"asset_cfg": SceneEntityCfg("robot")},
@@ -769,14 +769,14 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         "joint_vel_l2": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=0,
+            func=mdp.joint_vel_l2, weight=-1e-4,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         # Arm-specific velocity penalty: calms shoulder/elbow/wrist flailing during the
         # rise (the global joint_vel_l2 above is too weak to constrain the arms, and the
         # only arm-posture term is gated to standing). Reuses the shared joint_vel_l2.
         "reg_arm_vel": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=0,
+            func=mdp.joint_vel_l2, weight=-4e-3,
             params={"asset_cfg": SceneEntityCfg(
                 "robot", joint_names=(".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"))},
         ),
@@ -828,10 +828,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.post_base_orientation, weight=10.0,
             params={"scale": 8.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Base height target 0.7 m (flat ground); tight Gaussian (-20).
+        # Base height target 0.70 m (slightly bent knees); tight Gaussian (-20).
         "post_base_height": RewardTermCfg(
             func=mdp.post_base_height, weight=10.0,
-            params={"target_height": 0.757, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={"target_height": 0.70, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # arm-only posture disabled: full-body HOME tracking is handled by post_standing_posture.
         "post_upper_body_posture": RewardTermCfg(
