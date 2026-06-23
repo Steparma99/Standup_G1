@@ -1238,13 +1238,14 @@ _POST_UPPER_CACHE_ATTR = "_post_upper_body_cache"
 _HOME_L2_CACHE_ATTR = "_home_l2_cache"
 
 
-def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.06) -> torch.Tensor:
+def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.02) -> torch.Tensor:
     """Height × upright gate for post-task and style-standing rewards [B,].
 
     Height factor: linear ramp 0→1 over [threshold-band, threshold+band].
     Upright factor: clamp(-proj_grav_z, 0, 1) — 0 when lying, 1 when fully upright.
-    With default band=0.06 and H_STAGE2=0.65: ramp spans [0.59m, 0.71m]; G1 HOME pose
-    (pelvis=0.757m, upright) gives height=1.0, upright=1.0 → gate=1.0.
+    With default band=0.02 and H_STAGE2=0.65: ramp spans [0.63m, 0.67m]; gate reaches
+    100% at 0.67m — just 2cm above the standing threshold, eliminating the gradient
+    that previously pulled the robot to jump toward 0.71m (old band=0.06).
     """
     h = asset.data.root_link_pos_w[:, 2]
     upright = torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)
@@ -1308,10 +1309,13 @@ def post_base_lin_vel(
     height_threshold: float = H_STAGE2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Post-task base lin-vel: exp(-5·||v_xy||²) · 1(h>H_STAGE2). Hold position [B,]."""
+    """Post-task base lin-vel: exp(-scale·||v||²) · gate. Penalizes all 3D velocity [B,].
+
+    Includes vertical velocity (v_z) to directly penalize jumping after standup.
+    """
     asset: Entity = env.scene[asset_cfg.name]
-    v_xy = asset.data.root_link_lin_vel_b[:, :2]
-    return torch.exp(-scale * v_xy.pow(2).sum(dim=1)) * _post_gate(asset, height_threshold)
+    v = asset.data.root_link_lin_vel_b[:, :3]
+    return torch.exp(-scale * v.pow(2).sum(dim=1)) * _post_gate(asset, height_threshold)
 
 
 def post_base_orientation(

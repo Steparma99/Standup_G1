@@ -821,17 +821,17 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_base_lin_vel": RewardTermCfg(
-            func=mdp.post_base_lin_vel, weight=10.0,
-            params={"scale": 5.0, "asset_cfg": SceneEntityCfg("robot")},
+            func=mdp.post_base_lin_vel, weight=15.0,
+            params={"scale": 15.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_base_orientation": RewardTermCfg(
             func=mdp.post_base_orientation, weight=10.0,
             params={"scale": 8.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Base height target 0.70 m (slightly bent knees); tight Gaussian (-20).
+        # Base height target 0.65 m (standing threshold); tight Gaussian (-20).
         "post_base_height": RewardTermCfg(
             func=mdp.post_base_height, weight=10.0,
-            params={"target_height": 0.70, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={"target_height": 0.65, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # arm-only posture disabled: full-body HOME tracking is handled by post_standing_posture.
         "post_upper_body_posture": RewardTermCfg(
