@@ -680,6 +680,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_group_deviation,
             weight=-8.0,
             params={"lower": -0.25, "upper": 0.25, "gate_lo": 0.65, "band": 0.08,
+                    "require_upright": True,
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
         ),

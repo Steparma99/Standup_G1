@@ -757,6 +757,7 @@ def joint_group_deviation(
     gate_lo: float | None = None,
     gate_hi: float | None = None,
     band: float = 0.10,
+    require_upright: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Soft penalty for a joint group leaving the allowed band [lower, upper] [B,].
@@ -764,12 +765,16 @@ def joint_group_deviation(
     `over = clamp(q−upper,0)+clamp(lower−q,0)` per joint, Σ over² · phase_gate.
     Soft (quadratic) version of HoST's binary deviation penalties; the joint group
     is selected per-robot via asset_cfg.joint_ids, the active phase via gate_lo/hi.
+    When require_upright=True the gate is additionally multiplied by clamp(-proj_grav_z,0,1)
+    so the penalty only fires when the robot is both high enough AND upright.
     """
     asset: Entity = env.scene[asset_cfg.name]
     q = asset.data.joint_pos[:, asset_cfg.joint_ids]
     over = torch.clamp(q - upper, min=0.0) + torch.clamp(lower - q, min=0.0)
     pen = torch.sum(over.pow(2), dim=1)
     gate = _stage_gate(asset.data.root_link_pos_w[:, 2], lo=gate_lo, hi=gate_hi, band=band)
+    if require_upright:
+        gate = gate * torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)
     return pen * gate
 
 
@@ -1011,12 +1016,11 @@ def style_waist_yaw_deviation(
     penalty: float = -10.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Binary: penalty if |q_waist_yaw| > limit (HoST waist deviation) [B,]. Gated h>H_STAGE2."""
+    """Binary: penalty if |q_waist_yaw| > limit (HoST waist deviation) [B,]. Gated h>H_STAGE2 + upright."""
     asset: Entity = env.scene[asset_cfg.name]
     q = asset.data.joint_pos[:, asset_cfg.joint_ids]  # [B, n]
     viol = (q.abs() > limit).any(dim=1).float()
-    h = asset.data.root_link_pos_w[:, 2]
-    return penalty * viol * _standing_gate(h, H_STAGE2)
+    return penalty * viol * _post_gate(asset, H_STAGE2)
 
 
 def style_hip_deviation(
@@ -1038,8 +1042,7 @@ def style_hip_deviation(
     q_yaw = asset.data.joint_pos[:, yaw_ids].abs()  # [B, 2]
     roll_viol = (q_roll.max(dim=1).values > roll_limit).float()
     yaw_viol = (q_yaw.min(dim=1).values > yaw_limit).float()
-    h = asset.data.root_link_pos_w[:, 2]
-    return (penalty * roll_viol + penalty * yaw_viol) * _standing_gate(h, H_STAGE2)
+    return (penalty * roll_viol + penalty * yaw_viol) * _post_gate(asset, H_STAGE2)
 
 
 def style_knee_deviation(
@@ -1058,8 +1061,7 @@ def style_knee_deviation(
     q = asset.data.joint_pos[:, asset_cfg.joint_ids]  # [B, 2]
     hi_viol = (q.max(dim=1).values > hi_limit).float()
     lo_viol = (q.min(dim=1).values < lo_limit).float()
-    h = asset.data.root_link_pos_w[:, 2]
-    return (penalty * hi_viol + penalty * lo_viol) * _standing_gate(h, H_STAGE2)
+    return (penalty * hi_viol + penalty * lo_viol) * _post_gate(asset, H_STAGE2)
 
 
 def style_shoulder_roll_deviation(
@@ -1081,8 +1083,7 @@ def style_shoulder_roll_deviation(
     q = asset.data.joint_pos[:, ids]  # [B, 2] -> [:, 0]=left, [:, 1]=right
     left_viol = (q[:, 0] < left_limit).float()
     right_viol = (q[:, 1] > right_limit).float()
-    h = asset.data.root_link_pos_w[:, 2]
-    return (penalty * left_viol + penalty * right_viol) * _standing_gate(h, H_STAGE2)
+    return (penalty * left_viol + penalty * right_viol) * _post_gate(asset, H_STAGE2)
 
 
 def style_foot_displacement(
@@ -1122,8 +1123,7 @@ def style_foot_distance(
     asset: Entity = env.scene[asset_cfg.name]
     pos = asset.data.site_pos_w[:, asset_cfg.site_ids, :2]  # [B, 2, 2]
     d2 = (pos[:, 0] - pos[:, 1]).pow(2).sum(dim=-1)  # [B]
-    h = asset.data.root_link_pos_w[:, 2]
-    return penalty * (d2 > max_dist_sq).float() * _standing_gate(h, H_STAGE2)
+    return penalty * (d2 > max_dist_sq).float() * _post_gate(asset, H_STAGE2)
 
 
 def style_shank_orientation(
@@ -1200,8 +1200,7 @@ def style_ankle_parallel(
     g = asset.data.gravity_vec_w.unsqueeze(1).expand(-1, quat.shape[1], -1)  # [B, 2, 3]
     pg = quat_apply_inverse(quat, g)  # [B, 2, 3]
     tilt = pg[..., :2].pow(2).sum(dim=-1).mean(dim=1)  # [B]; 0 flat -> grows with tilt
-    h = asset.data.root_link_pos_w[:, 2]
-    return reward * torch.exp(-tilt / (2 * tilt_threshold)) * _standing_gate(h, H_STAGE1)
+    return reward * torch.exp(-tilt / (2 * tilt_threshold)) * _post_gate(asset, H_STAGE1)
 
 
 def style_feet_stumble(
@@ -1240,14 +1239,16 @@ _HOME_L2_CACHE_ATTR = "_home_l2_cache"
 
 
 def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.06) -> torch.Tensor:
-    """Smooth post-task gate: linear ramp from 0→1 over [threshold-band, threshold+band] [B,].
+    """Height × upright gate for post-task and style-standing rewards [B,].
 
-    Replaces the previous hard step to give the policy gradient signal as it approaches
-    standing height. With default band=0.06: ramp spans [0.59m, 0.71m]; all lying poses
-    (h<0.37m) still receive ~0; the cliff at H_STAGE2 is removed.
+    Height factor: linear ramp 0→1 over [threshold-band, threshold+band].
+    Upright factor: clamp(-proj_grav_z, 0, 1) — 0 when lying, 1 when fully upright.
+    With default band=0.06 and H_STAGE2=0.65: ramp spans [0.59m, 0.71m]; G1 HOME pose
+    (pelvis=0.757m, upright) gives height=1.0, upright=1.0 → gate=1.0.
     """
     h = asset.data.root_link_pos_w[:, 2]
-    return _standing_gate(h, height_threshold, band=band)
+    upright = torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)
+    return _standing_gate(h, height_threshold, band=band) * upright
 
 
 def home_pose_l2(
