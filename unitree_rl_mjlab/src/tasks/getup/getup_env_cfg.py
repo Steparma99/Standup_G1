@@ -874,7 +874,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # post-standing exemption all depend on.
         "stable_success_hold": RewardTermCfg(
             func=mdp.stable_success_hold, weight=10.0,
-            params={"n_hold": 50, "height_threshold": 0.65, "asset_cfg": SceneEntityCfg("robot")},
+            params={"n_hold": 15, "height_threshold": 0.65, "asset_cfg": SceneEntityCfg("robot")},
         ),
     }
 

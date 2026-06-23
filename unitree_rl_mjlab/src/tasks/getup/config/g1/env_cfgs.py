@@ -48,7 +48,7 @@ _ASSIST_INITIAL_FORCE_N        = 120.0   # ~30% of G1 weight (~400 N); gentle li
 _ASSIST_FORCE_DECAY_PER_SUCCESS = 5.0    # N removed per successful episode (per env)
 _ASSIST_FORCE_MIN              = 0.0     # fully unassisted floor
 _ASSIST_SUCCESS_HEIGHT         = 0.65    # pelvis height counting as "stood" (task threshold)
-_ASSIST_PROGRESS_FLOOR         = 0.45   # min height for partial-credit decay; must be above
+_ASSIST_PROGRESS_FLOOR         = 0.60   # min height for partial-credit decay; must be above
                                          # the robot's natural lying height (~0.20 m for PRONE
                                          # + fall_height) so a failed episode earns no credit
 _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated/settle
