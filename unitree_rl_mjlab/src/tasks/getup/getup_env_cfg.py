@@ -753,7 +753,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # penalties (all 9 terms wired).
         # ===================================================================
         "joint_acc_l2": RewardTermCfg(
-            func=mdp.joint_acc_l2, weight=-2e-3,
+            func=mdp.joint_acc_l2, weight=-2e-4,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-2e-3),
