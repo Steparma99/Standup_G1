@@ -720,7 +720,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # default to G1 in rewards.py.
         "style_shank_orientation": RewardTermCfg(
             func=mdp.style_shank_orientation,
-            weight=10.0,
+            weight=5.0,
             params={"lower": 0.8, "margin": 1.0, "value_at_margin": 0.1,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
@@ -753,7 +753,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # penalties (all 9 terms wired).
         # ===================================================================
         "joint_acc_l2": RewardTermCfg(
-            func=mdp.joint_acc_l2, weight=0, # -2.5e-7,
+            func=mdp.joint_acc_l2, weight=-2e-3,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-2e-3),
@@ -822,7 +822,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         "post_base_lin_vel": RewardTermCfg(
             func=mdp.post_base_lin_vel, weight=15.0,
-            params={"scale": 15.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={"scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_base_orientation": RewardTermCfg(
             func=mdp.post_base_orientation, weight=10.0,
