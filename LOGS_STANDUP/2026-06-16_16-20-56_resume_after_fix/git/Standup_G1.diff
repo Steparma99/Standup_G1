@@ -1,0 +1,37 @@
+--- git commit ---
+174c79fc5f7a6f9dd344caaabe6908ba3388c391
+
+
+--- git status ---
+On branch master
+Your branch is up to date with 'origin/master'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   hardware_config.yaml
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	=1.4.0,
+	mjlab
+	nohup.out
+	unitree_rl_mjlab/nohup.out
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/hardware_config.yaml b/hardware_config.yaml
+index 9017c58..bb2240c 100644
+--- a/hardware_config.yaml
++++ b/hardware_config.yaml
+@@ -6,7 +6,7 @@
+ #   "cuda" → NVIDIA GPU with CUDA support
+ # ============================================================
+ 
+-backend: "cpu"
++backend: "cuda"
+ 
+ # --- Training defaults shared by local launchers ---
+ train:

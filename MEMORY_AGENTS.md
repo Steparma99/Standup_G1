@@ -125,4 +125,3 @@ Aggiunta l'osservazione `body_height` (altezza pelvis, scalare per ogni env) che
 
 **Compatibilità ONNX**: l'export automatico al checkpoint è necessario per il deployment diretto su hardware G1 senza passi manuali aggiuntivi.
 
-

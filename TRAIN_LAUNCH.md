@@ -1,69 +1,124 @@
-  Training
-  CPU / AMD:
+****  Making a fast training to visualize initial position and first steps ****
 
-  conda run -n unitree_rl_cpu python TRAIN_RENDER.py --engine mjlab --task Unitree-G1-GetUp --mode train --max-iterations
-  100 --num-envs 64
+  cd ~/HumanUP/unitree_rl_mjlab && \
+python scripts/train.py Unitree-G1-GetUp \
+  --agent.max-iterations=500 \
+  --agent.experiment-name=g1_getup \
+  --agent.run-name=debug_local \
+  --agent.logger=tensorboard \
+  --env.scene.num-envs=1 \
+  --gpu-ids None \
+  --viewer True
 
-  GPU NVIDIA:
+Base training (Use defaults: 4096 env, 12000 iter, wandb)
 
-  conda run -n unitree_rl_cuda python TRAIN_RENDER.py --engine mjlab --task Unitree-G1-GetUp --mode train --max-iterations
-  100 --num-envs 4096
+bash launch.sh Unitree-G1-GetUp "insert run name"
 
-  Training breve di test:
+Costumize with 
 
-  conda run -n unitree_rl_cpu python TRAIN_RENDER.py --engine mjlab --task Unitree-G1-GetUp --mode train --max-iterations 1
-  --num-envs 2
+bash launch.sh Unitree-G1-GetUp "insert run name"\
+--agent.max-iterations=5000\
+--env.scene.num-envs=1024\
+--agent.logger=tensorboard
 
-  Se vuoi lanciare senza wrapper, diretto:
-  CPU / AMD:
+Or:
 
-  cd /home/aidapt/TEST_STAND/Standup_G1/unitree_rl_mjlab
-  HOME=/tmp MPLCONFIGDIR=/tmp XDG_CACHE_HOME=/tmp WARP_CACHE_DIR=/tmp/warp conda run -n unitree_rl_cpu python scripts/
-  train.py Unitree-G1-GetUp --gpu-ids None --agent.max-iterations=100 --env.scene.num-envs=64
+MUJOCO_GL=egl conda run -n unitree_rl_cuda --no-capture-output \
+python scripts/train.py Unitree-G1-GetUp \
+  --agent.max-iterations=300 \
+  --agent.run-name=test_bootstrap_fix \
+  --env.scene.num-envs=512
 
-  GPU NVIDIA:
+**Resume a training**
 
-  cd /home/aidapt/TEST_STAND/Standup_G1/unitree_rl_mjlab
-  conda run -n unitree_rl_cuda python scripts/train.py Unitree-G1-GetUp --gpu-ids 0 --agent.max-iterations=100
-  --env.scene.num-envs=4096
+cd ~/Standup/Standup_G1/unitree_rl_mjlab && \
+nohup python scripts/train.py Unitree-G1-GetUp \
+  --agent.resume=True \
+  --agent.load-run= ""\
+  --agent.load-checkpoint="model_.pt" \/
+  --agent.experiment-name=g1_getup \
+  --agent.run-name=resume_after_fix \
+  --agent.max-iterations=4000 \
+  --env.scene.num-envs=8192 \
+  > train_resume.log 2>&1 &
+disown
 
-  Render / Play
-  Dopo il training, render dell’ultimo checkpoint:
-  CPU / AMD:
 
-  conda run -n unitree_rl_cpu python TRAIN_RENDER.py --engine mjlab --task Unitree-G1-GetUp --mode play
+For visualizing log
+bash status.sh
 
-  GPU NVIDIA:
+Log in in real time
+tail -f ~/Standup/Standup_G1/unitree_rl_mjlab/logs/train_<run_name>.log
 
-  conda run -n unitree_rl_cuda python TRAIN_RENDER.py --engine mjlab --task Unitree-G1-GetUp --mode play
+Log from the beginning
+less ~/Standup/Standup_G1/unitree_rl_mjlab/logs/train_<run_name>.log
 
-  Training + play automatico:
+Killing
+bash kill.sh
 
-  conda run -n unitree_rl_cpu python TRAIN_RENDER.py --engine mjlab --task Unitree-G1-GetUp --mode both --max-iterations
-  100 --num-envs 64
+Verifying manually
+ps -ef | grep "train.py" | grep -v grep
 
-Log e pesi
-  I log e i checkpoint finiscono qui:
 
-  - cartella esperimento: unitree_rl_mjlab/logs/rsl_rl/g1_getup
-  - ogni run crea una sottocartella timestamp, ad esempio:
-    unitree_rl_mjlab/logs/rsl_rl/g1_getup/2026-06-04_13-22-56_train_render_quick
+**Sending on localhost a visualization test**
 
-  Dentro trovi:
+cd ~/Standup/Standup_G1/unitree_rl_mjlab && \
+MUJOCO_GL=egl conda run -n unitree_rl_cuda --no-capture-output \
+python scripts/play.py Unitree-G1-GetUp \
+  --checkpoint-file logs/rsl_rl/g1_getup/<run-name>/model_<N>.pt \
+  --eval-beta 0.97 \
+  --viewer viser \
+  --num-envs 1
 
-  - pesi: model_0.pt, model_100.pt, ... e ultimo model_<iter>.pt
-  - config dump: params/env.yaml, params/agent.yaml
-  - diff git: git/unitree_rl_mjlab.diff
-  - eventuali video play/train se registrati
+cd ~/Standup/Standup_G1/unitree_rl_mjlab && \
+MUJOCO_GL=egl conda run -n unitree_rl_cuda --no-capture-output \
+python scripts/play.py Unitree-G1-GetUp \
+  --checkpoint-file logs/rsl_rl/g1_getup/2026-06-23_16-55-45_phase2_no_jump_v/model_4498.pt \
+  --eval-beta 0.97 \
+  --num-envs 16 --max-extra-envs 8 \
+  --cam-distance 6 --cam-elevation -15 \
+  --video=True --video-length 500 --video-width 1920 --video-height 1080
 
-  TensorBoard
-  Sì, ora il task usa tensorboard.
 
-  Lancio:
+**Visualize Rewards on the server**:
 
-  cd /home/aidapt/TEST_STAND/Standup_G1/unitree_rl_mjlab
-  conda run -n unitree_rl_cpu tensorboard --logdir logs/rsl_rl/g1_getup --port 6006
+cd ~/Standup/Standup_G1/unitree_rl_mjlab/logs/rsl_rl/g1_getup
+RUN="2026-06-24_09-34-38_Phase_3_no_jump/"
 
-  Poi apri nel browser:
+conda run --no-capture-output -n unitree_rl_cuda python3 - "$RUN" <<'EOF'
+import sys, glob
+from tensorboard.backend.event_processing import event_accumulator
+run = sys.argv[1]
+ev = glob.glob(run + "events.out.tfevents.*")[0]
+ea = event_accumulator.EventAccumulator(ev, size_guidance={'scalars': 0})
+ea.Reload()
 
-  http://localhost:6006
+def sample(tag, n=12):
+    if tag not in ea.Tags().get('scalars', []):
+        print(f"{tag}: NOT FOUND")
+        return
+    vals = ea.Scalars(tag)
+    idxs = range(len(vals)) if len(vals) <= n else [round(i*(len(vals)-1)/(n-1)) for i in range(n)]
+    pts = [(vals[i].step, vals[i].value) for i in idxs]
+    print(tag + ":")
+    print("  " + "  ".join(f"it{s}={v:.4f}" for s, v in pts))
+
+tags = [
+  "Train/mean_episode_length", "Train/mean_reward",
+  "Episode_Termination/no_progress_timeout", "Episode_Termination/time_out",
+  "Episode_Termination/ground_penetration", "Episode_Termination/base_vel_explosion",
+  "Episode_Termination/joint_vel_explosion",
+  "Episode_Metrics/stage/stage0", "Episode_Metrics/stage/stage1",
+  "Episode_Metrics/stage/stage2", "Episode_Metrics/stage/stage3",
+  "Episode_Metrics/success/candidate", "Episode_Metrics/success/ever_stood",
+  "Episode_Metrics/success/stable_hold", "Episode_Metrics/success/fall_after_success",
+  "Episode_Metrics/curriculum/assistance_force", "Episode_Metrics/curriculum/beta_rescaler",
+  "Episode_Metrics/reward_group/task", "Episode_Metrics/reward_group/style",
+  "Episode_Metrics/reward_group/regularization", "Episode_Metrics/reward_group/post_task",
+  "Episode_Metrics/contact/feet", "Episode_Metrics/contact/torso",
+]
+for t in tags:
+    sample(t)
+print()
+print("last iteration step seen:", ea.Scalars("Train/mean_episode_length")[-1].step)
+EOF

@@ -1,0 +1,63 @@
+seed: 42
+num_steps_per_env: 50
+max_iterations: 4000
+obs_groups:
+  actor: !!python/tuple
+  - actor
+  critic: !!python/tuple
+  - critic
+save_interval: 100
+experiment_name: g1_getup
+run_name: resume_after_fix
+logger: tensorboard
+wandb_project: g1_getup
+wandb_tags: !!python/tuple []
+resume: true
+load_run: 2026-06-16_12-39-04_New_fixed_rewards
+load_checkpoint: model_800.pt
+clip_actions: null
+upload_model: true
+class_name: OnPolicyRunner
+actor:
+  hidden_dims: !!python/tuple
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  distribution_cfg:
+    init_std: 1.5
+    std_type: scalar
+    min_std: 0.05
+    max_std: 2.0
+critic:
+  hidden_dims: !!python/tuple
+  - 512
+  - 256
+  activation: elu
+  obs_normalization: true
+algorithm:
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.0005
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.005
+  desired_kl: 0.02
+  max_grad_norm: 1.0
+  value_loss_coef: 1.0
+  use_clipped_value_loss: false
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  optimizer: adam
+  reward_group_weights: !!python/tuple
+  - 2.5
+  - 1.9
+  - 0.1
+  - 1.0
+  l2c2_actor_coef: 1.0
+  l2c2_critic_coef: 0.1
+  rnd_cfg: null
+  symmetry_cfg: null
+multi_gpu: null
