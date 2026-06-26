@@ -23,14 +23,14 @@ except (ImportError, ModuleNotFoundError):
 ##
 
 G1_XML: Path = (
-  SRC_PATH / "assets" / "robots" / "unitree_g1" / "xmls" / "g1.xml"
+  SRC_PATH / "assets" / "robots" / "g1" / "g1_body29_hand14.xml"
 )
 assert G1_XML.exists()
 
 
 def get_assets(meshdir: str) -> dict[str, bytes]:
   assets: dict[str, bytes] = {}
-  assets_dir = G1_XML.parent / "assets"
+  assets_dir = G1_XML.parent / meshdir
   for asset_path in assets_dir.rglob("*"):
     if asset_path.is_file():
       assets[str(asset_path.relative_to(assets_dir))] = asset_path.read_bytes()
@@ -171,6 +171,12 @@ G1_ACTUATOR_4010 = BuiltinPositionActuatorCfg(
   damping=DAMPING_4010,
   effort_limit=ACTUATOR_4010.effort_limit,
   armature=ACTUATOR_4010.reflected_inertia,
+)
+G1_ACTUATOR_HAND = BuiltinPositionActuatorCfg(
+  target_names_expr=(r".*_hand_(thumb|middle|index)_\d_joint",),
+  stiffness=5.0,
+  damping=0.2,
+  effort_limit=1.4,
 )
 
 # Waist pitch/roll and ankles are 4-bar linkages with 2 5020 actuators.
@@ -493,6 +499,7 @@ G1_ARTICULATION = EntityArticulationInfoCfg(
     G1_ACTUATOR_4010,
     G1_ACTUATOR_WAIST,
     G1_ACTUATOR_ANKLE,
+    G1_ACTUATOR_HAND,
   ),
   soft_joint_pos_limit_factor=0.9,
 )
@@ -510,6 +517,7 @@ G1_ARTICULATION_HOST = EntityArticulationInfoCfg(
     G1_ACTUATOR_4010,
     G1_ACTUATOR_WAIST,
     G1_ACTUATOR_ANKLE,
+    G1_ACTUATOR_HAND,
   ),
   soft_joint_pos_limit_factor=0.98,
 )
@@ -595,6 +603,7 @@ def get_g1_supine_robot_cfg_with_delay() -> EntityCfg:
       _wrap_with_delay(G1_ACTUATOR_4010),
       _wrap_with_delay(G1_ACTUATOR_WAIST),
       _wrap_with_delay(G1_ACTUATOR_ANKLE),
+      _wrap_with_delay(G1_ACTUATOR_HAND),
     ),
     soft_joint_pos_limit_factor=0.9,
   )

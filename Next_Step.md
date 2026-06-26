@@ -1,452 +1,414 @@
-Piano di Integrazione HoST → HumanUP G1 29 DOF
-
-   Contesto
-
-   Il progetto HumanUP usa unitree_rl_mjlab (IsaacLab + backend MuJoCo) con rsl_rl PPO per addestrare un G1 a 29 DOF ad alzarsi da terra. HoST è una repository parallela che usa IsaacGym con un G1 a 23 DOF — framework completamente diverso, quindi il codice non è portabile 1:1. Quello che si porta sono i concetti e le strutture dati, tradotti nelle API di IsaacLab/MuJoCo.                                                                                                       ↑
-
-   I 6 DOF extra nel G1 29 rispetto al 23 sono: +2 waist (roll/pitch, HoST ha solo waist_yaw) + +1 wrist per braccio (wrist_pitch + wrist_yaw vs solo wrist_roll in HoST) = 6 DOF in più.
-                                                                                                                          ↑
-   Priorità di implementazione: ordinate per valore/rischio — le prime non dipendono dalle ultime.
-
-   ---                                                                                                                    ↑
-   Nota Architetturale Critica
-
-   HoST usa IsaacGym (NVIDIA, solo GPU), HumanUP usa IsaacLab con backend MuJoCo.                                         ↑
-   - Le classi di configurazione (EventTermCfg, RewardTermCfg, ObsTermCfg) sono IsaacLab
-   - I sensori di contatto sono gestiti via ContactSensorCfg
-   - Le forze esterne si applicano via scene.robot.apply_external_force_and_torque()                                      ↑
-   - I siti anatomici in MuJoCo XML si definiscono con <site> (massless markers)
-                                                                                                                          ↑
-   ---
-   Feature 1 — Style & Symmetry Rewards
-                                                                                                                          ↑
-   Priorità: ALTA | Rischio: BASSO | Dipendenze: nessuna
-
-   Perché                                                                                                                 ↑
-
-   Rewards di stile migliorano la qualità del movimento durante il sim2real: penalizzano posture bizzarre che funzionano in simulazione ma collassano sul robot reale. HoST li usa come gruppo separato con peso 1.0 moltiplicativo.               ↑
-
-   Concetti da HoST
-                                                                                                                          ↑
-   - waist_deviation: penalità se waist roll/pitch/yaw escono da soglia (es. >0.8 rad)
-   - hip_symmetry: |hip_pitch_L - hip_pitch_R| — simmetria sinistra/destra
-   - shoulder_deviation: braccia vicine al corpo quando in piedi (shoulder_roll ~ 0)                                      ↑
-   - shank_orientation: tibia verticale durante l'alzata (dot product shank frame con z_world)
-   - feet_level: ankle_roll vicino a 0 quando in piedi                                                                    ↑
-   - feet_under_body: piedi proiettati sotto il pelvis (distanza XY piccola)
-   - feet_distance: piedi non troppo distanti tra loro                                                                    ↑
-
-   Implementazione                                                                                                        ↑
-
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/rewards.py
-   Aggiungere le seguenti funzioni reward (tutte stateless, pure math su env.scene):
-
-   def waist_deviation(env, waist_pitch_weight, waist_roll_weight, threshold):                                            ↑
-       # joint_pos per waist_pitch_joint e waist_roll_joint
-       # penalità esponenziale se |pos| > threshold
-                                                                                                                          ↑
-   def body_symmetry(env, weight):
-       # |hip_pitch_L - hip_pitch_R| + |knee_L - knee_R| + |ankle_pitch_L - ankle_pitch_R|                                ↑
-
-   def shank_orientation(env, weight):                                                                                    ↑
-       # vettore knee→ankle in world frame, dot con [0,0,1]
-       # reward se tibia è vicina alla verticale                                                                          ↑
-
-   def feet_under_pelvis(env, weight):
-       # pos_pelvis_xy - mean(pos_feet_xy), penalità se distanza > threshold                                              ↑
-
-   def shoulder_symmetry(env, weight):
-       # |shoulder_roll_L - shoulder_roll_R| penalità                                                                     ↑
-
-   File: unitree_rl_mjlab/src/tasks/getup/getup_env_cfg.py
-   Aggiungere alla sezione rewards:                                                                                       ↑
-   # Style group (aggiungere con pesi bassi inizialmente: 0.1–0.5)
-   waist_deviation = RewardTermCfg(func=rewards.waist_deviation, weight=-0.3, ...)                                        ↑
-   body_symmetry = RewardTermCfg(func=rewards.body_symmetry, weight=-0.2, ...)
-   shank_orientation = RewardTermCfg(func=rewards.shank_orientation, weight=0.5, ...)                                     ↑
-   feet_under_pelvis = RewardTermCfg(func=rewards.feet_under_pelvis, weight=-0.3, ...)
-
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/metrics.py
-   Aggiungere metriche style/* per TensorBoard (pattern identico alle metriche esistenti).
-                                                                                                                          ↑
-   Indici DOF utili (da g1_constants.py)
-
-   - waist_yaw_joint, waist_roll_joint, waist_pitch_joint → indici 12–14                                                  ↑
-   - left_hip_pitch_joint vs right_hip_pitch_joint
-   - left_ankle_roll_joint vs right_ankle_roll_joint
-                                                                                                                          ↑
-   ---
-   Feature 2 — Extended Init Positions
-                                                                                                                          ↑
-   Priorità: ALTA | Rischio: BASSO | Dipendenze: nessuna
-
-   Perché                                                                                                                 ↑
-
-   Attualmente il robot parte solo SUPINE o PRONE. Aggiungere SIDE_LEFT, SIDE_RIGHT (sdraiato su un fianco) rende la policy più robusta e copre scenari reali. HoST prevede anche SEATED e CROUCHED come keyframe.                                 ↑
-
-   Keyframe da aggiungere
-                                                                                                                          ↑
-   I valori esatti di quaternion/joint vanno determinati empiricamente (o da MuJoCo keyframe editor), ma le stime ragionevoli sono:
-                                                                                                                          ↑
-   ┌────────────┬───────────┬─────────────────────────┬─────────────────────────┐
-   │  Keyframe  │ pos Z (m) │  Quaternion (w,x,y,z)   │          Note           │
-   ├────────────┼───────────┼─────────────────────────┼─────────────────────────┤                                         ↑
-   │ SIDE_LEFT  │ ~0.12     │ (0.7071, -0.7071, 0, 0) │ Fianco sinistro a terra │
-   ├────────────┼───────────┼─────────────────────────┼─────────────────────────┤
-   │ SIDE_RIGHT │ ~0.12     │ (0.7071, 0.7071, 0, 0)  │ Fianco destro a terra   │                                         ↑
-   ├────────────┼───────────┼─────────────────────────┼─────────────────────────┤
-   │ SEATED     │ ~0.45     │ (1, 0, 0, 0)            │ Seduto con gambe tese   │
-   └────────────┴───────────┴─────────────────────────┴─────────────────────────┘                                         ↑
-
-   File: unitree_rl_mjlab/src/assets/robots/unitree_g1/g1_constants.py
-   Aggiungere alla lista KEYFRAMES:                                                                                       ↑
-   KEYFRAME_SIDE_LEFT = {
-       "qpos": [...],  # joint angles con hip_roll_L ~1.2, hip_roll_R ~-0.3                                               ↑
-       "quat": [0.7071, -0.7071, 0.0, 0.0],
-       "pos": [0.0, 0.0, 0.12],                                                                                           ↑
-   }
-   KEYFRAME_SIDE_RIGHT = { ... }                                                                                          ↑
-
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/events.py
-   Nella funzione reset_to_random_keyframe, estendere il campionamento:
-   # Attuale: campiona random tra SUPINE e PRONE (0.5/0.5)                                                                ↑
-   # Nuovo: campiona tra [SUPINE, PRONE, SIDE_LEFT, SIDE_RIGHT] con probabilità configurabile
-   keyframe_probs = env.cfg.init_pose_probs  # es. [0.3, 0.3, 0.2, 0.2]
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/config/g1/env_cfgs.py
-   Aggiungere parametro init_pose_probs configurabile e flag _ENABLE_SIDE_POSES.                                          ↑
-
-   Come trovare i valori giusti
-
-   1. Aprire il viewer MuJoCo: python scripts/play.py Unitree-G1-GetUp --viewer native
-   2. Muovere il robot a mano con il viewer                                                                               ↑
-   3. Leggere qpos dalla console con print(env.scene.robot.data.joint_pos)
-
-   ---                                                                                                                    ↑
-   Feature 3 — Anatomical Keypoints (Siti Anatomici)
-                                                                                                                          ↑
-   Priorità: MEDIA | Rischio: MEDIO | Dipendenze: nessuna, ma abilita Feature 1 avanzata
-
-   Perché
-
-   HoST usa 17 "keyframe bodies" (link zero-massa) per tracciare pose anatomiche e per futura motion imitation. In MuJoCo equivale a sites — marker massless attaccati a body links. Servono per:
-   1. Reward di pose più precisi (distanza tra keypoint predetto e target)
-   2. Osservazioni più ricche per il critic                                                                               ↑
-   3. Base per futura motion imitation (HoST approach avanzato)
-                                                                                                                          ↑
-   I 17 siti di HoST (adattati per G1 29 DOF)
-                                                                                                                          ↑
-   head, torso, pelvis
-   collar_L, collar_R
-   shoulder_L, shoulder_R
-   elbow_L, elbow_R                                                                                                       ↑
-   wrist_L, wrist_R
-   hip_L, hip_R
-   knee_L, knee_R                                                                                                         ↑
-   ankle_L, ankle_R
-
-   Implementazione MuJoCo                                                                                                 ↑
-
-   File: unitree_rl_mjlab/src/assets/robots/unitree_g1/xmls/g1.xml
-   Per ogni link rilevante, aggiungere un <site> con offset ergonomico:                                                   ↑
-   <!-- Nel body "head_link" -->
-   <site name="kp_head" pos="0 0 0.05" size="0.01"/>
-                                                                                                                          ↑
-   <!-- Nel body "pelvis" -->
-   <site name="kp_pelvis" pos="0 0 0" size="0.01"/>
-                                                                                                                          ↑
-   <!-- Nel body "left_knee_link" -->
-   <site name="kp_knee_l" pos="0 0 -0.05" size="0.01"/>
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/assets/robots/unitree_g1/g1_constants.py
-   KEYPOINT_SITE_NAMES = [
-       "kp_head", "kp_torso", "kp_pelvis",                                                                                ↑
-       "kp_collar_l", "kp_collar_r",
-       "kp_shoulder_l", "kp_shoulder_r",
-       "kp_elbow_l", "kp_elbow_r",                                                                                        ↑
-       "kp_wrist_l", "kp_wrist_r",
-       "kp_hip_l", "kp_hip_r",
-       "kp_knee_l", "kp_knee_r",                                                                                          ↑
-       "kp_ankle_l", "kp_ankle_r",
-   ]
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/getup_env_cfg.py
-   Aggiungere un FrameTransformerCfg o accedere ai body positions direttamente:
-   # IsaacLab: accesso a body positions tramite articulation data                                                         ↑
-   # env.scene.robot.data.body_pos_w[:, body_idx, :]
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/observations.py
-   Aggiungere funzione opzionale per critic privilegiato:                                                                 ↑
-   def keypoint_positions(env):
-       # Ritorna posizioni world-frame di tutti i siti anatomici                                                          ↑
-       # Shape: (num_envs, 17*3) = (N, 51)
-       body_indices = env.cfg.keypoint_body_indices
-       return env.scene.robot.data.body_pos_w[:, body_indices, :].reshape(N, -1)
-                                                                                                                          ↑
-   ---
-   Feature 4 — Assistance Curriculum (Forza di Supporto)
-                                                                                                                          ↑
-   Priorità: ALTA | Rischio: MEDIO | Dipendenze: nessuna
-                                                                                                                          ↑
-   Perché
-                                                                                                                          ↑
-   Questo è il contributo più importante di HoST per la convergenza del training. Il robot G1 pesa ~35 kg. Alzarsi da terra è un task difficile — il policy gradient è molto sparso all'inizio perché il robot raramente riesce ad alzarsi per caso. Applicare una forza verticale sul torso (simula un "aiuto" fisico che si ritira gradualmente) risolve il problema di esplorazione.                                                                                                          ↑
-
-   Meccanismo HoST
-                                                                                                                          ↑
-   Forza iniziale: 100 N (~ 30% peso robot)
-   Applicata a: torso_link, direzione +Z (verso l'alto)                                                                   ↑
-   Condizione: solo dopo i primi 30 step (lasciar cadere liberamente),
-               e solo se orientazione ok (gravity_z < -0.8) — skip per prone                                              ↑
-   Decay: -20 N per ogni reset dove mean(head_height) > 0.9 m
-   Floor: 0 N (si azzera completamente)
-
-   Implementazione IsaacLab/MuJoCo
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/getup_env_cfg.py
-   Aggiungere sezione curriculum:
-   @dataclass                                                                                                             ↑
-   class AssistanceCurriculumCfg:
-       enabled: bool = True                                                                                               ↑
-       initial_force_n: float = 80.0      # N, più basso che HoST (G1 pesa ~35kg)
-       force_decay_per_success: float = 5.0   # N per reset riuscito                                                      ↑
-       force_min: float = 0.0
-       success_height_threshold: float = 0.85  # m, head height per "riuscito"                                            ↑
-       unactuated_steps: int = 20        # step passivi iniziali prima di applicare
-       apply_to_body: str = "torso_link"
-
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/events.py
-   def apply_assistance_force(env):                                                                                       ↑
-       """Chiamato ogni step, applica forza verticale condizionale."""
-       if not env.cfg.assistance_curriculum.enabled:
-           return                                                                                                         ↑
-       cfg = env.cfg.assistance_curriculum
-                                                                                                                          ↑
-       # Skip unactuated phase
-       if env.episode_length_buf < cfg.unactuated_steps:                                                                  ↑
-           return
-
-       # Condizione: solo se non ancora in piedi (height check)
-       # Applica forza solo agli env che non hanno ancora superato il threshold                                           ↑
-
-       force = env.assistance_force  # (num_envs,) tensor, inizializzato in reset
-       torso_idx = env.torso_body_idx                                                                                     ↑
-
-       forces = torch.zeros(env.num_envs, env.scene.robot.num_bodies, 3, device=env.device)                               ↑
-       forces[:, torso_idx, 2] = force  # +Z upward
-       env.scene.robot.apply_external_force_and_torque(forces, torch.zeros_like(forces))                                  ↑
-
-   def decay_assistance_on_reset(env, env_ids):
-       """Chiamato al reset: se policy ha avuto successo, riduci forza."""
-       success_mask = env.metrics["ever_stood"][env_ids]  # o head_height > threshold                                     ↑
-       env.assistance_force[env_ids[success_mask]] -= env.cfg.assistance_curriculum.force_decay_per_success
-       env.assistance_force[env_ids].clamp_(min=0.0)
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/observations.py
-   Aggiungere al critic privilegiato: assistance_force_normalized (forza attuale / forza iniziale, scalare per env).      ↑
-
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/metrics.py                                                                  ↑
-   Aggiungere metrica curriculum/assistance_force_mean per vedere il decay su TensorBoard.
-
-   Nota sull'API IsaacLab
-
-   Il metodo esatto è ArticulationData.apply_external_force_and_torque() — verificare la versione di IsaacLab usata nel progetto (pip show isaaclab o vedere requirements.txt). L'alternativa è scrivere nell'articulation external_force_b direttamente se disponibile.
-                                                                                                                          ↑
-   ---
-   Feature 5 — Staged Reward Restructuring (Gruppi Reward)                                                                ↑
-
-   Priorità: MEDIA | Rischio: MEDIO-ALTO | Dipendenze: Feature 1 (style rewards)
-
-   Perché
-                                                                                                                          ↑
-   HoST organizza i reward in 4 gruppi con pesi separati: task × regu × style × post_task. Il reward task è moltiplicativo — se il robot non è orientato/alto, tutto il resto vale zero. Questo forza una gerarchia di apprendimento chiara.
-                                                                                                                          ↑
-   HumanUP attuale ha già staging (gating su stage0-3) ma in forma additiva. La ristrutturazione rende il curriculum più esplicito e manutenibile.                                                                                              ↑
-
-   Struttura Target                                                                                                       ↑
-
-   reward_groups = {                                                                                                      ↑
-       "task":      weight=2.5,  # height + orientation (moltiplicativo sugli altri)
-       "regu":      weight=0.1,  # smoothness, torque, velocity (additivo)
-       "style":     weight=1.0,  # waist, symmetry, feet (additivo, gated post-stage1)
-       "post_task": weight=1.0,  # stable hold, com over support (additivo, gated stage3+)
-   }                                                                                                                      ↑
-
-   Implementazione
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/getup_env_cfg.py
-   Aggiungere reward_group tag ai RewardTermCfg esistenti:
-   # Già esistente, aggiungere params={"group": "task"}                                                                   ↑
-   base_height_exp = RewardTermCfg(..., params={"group": "task"})
-   body_up_exp = RewardTermCfg(..., params={"group": "task"})
-   # etc.                                                                                                                 ↑
-
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/rewards.py
-   Aggiungere funzione aggregatrice:                                                                                      ↑
-   def compute_grouped_reward(env):
-       """Calcola reward totale con struttura a gruppi."""
-       task_r = sum(task_group_rewards)                                                                                   ↑
-       regu_r = sum(regu_group_rewards)
-       style_r = sum(style_group_rewards)                                                                                 ↑
-       post_r  = sum(post_task_group_rewards) * (stage >= 3)
-       return task_r * (cfg.regu_w * regu_r + cfg.style_w * style_r + cfg.post_w * post_r)
-                                                                                                                          ↑
-   Attenzione: Questa è una modifica profonda al loop di training. Da fare DOPO che un primo run NVIDIA ha già convergito bene con la struttura attuale additiva.
-                                                                                                                          ↑
-   ---
-   Feature 6 — Extended Domain Randomization
-                                                                                                                          ↑
-   Priorità: MEDIA | Rischio: BASSO (è già architetturato) | Dipendenze: run stabile
-
-   Perché                                                                                                                 ↑
-
-   I flag DR esistenti in env_cfgs.py sono tutti _ENABLE = False. Oltre ad attivarli, HoST aggiunge:
-   - Randomizzazione massa links (±20%)                                                                                   ↑
-   - Payload mass (oggetto portato, ±2-5 kg)
-   - Spostamento CoM (-3/+3 cm)                                                                                           ↑
-   - Attrito suolo (0.1-1.0)
-   - Push random durante episodio                                                                                         ↑
-
-   Implementazione
-
-   File: unitree_rl_mjlab/src/tasks/getup/config/g1/env_cfgs.py
-   I flag attuali da attivare (in ordine, uno per run):                                                                   ↑
-   1. _DR_MOTOR_STRENGTH_ENABLE = True (±10% torque)
-   2. _DR_PD_GAINS_ENABLE = True (±15% Kp, Kd)
-   3. _DR_ACTION_DELAY_ENABLE = True (delay 0-2 step)                                                                     ↑
-
-   Nuovi da aggiungere:                                                                                                   ↑
-   _DR_MASS_ENABLE = False
-   _DR_FRICTION_ENABLE = False
-   _DR_PUSH_ENABLE = False
-
-   # Config valori:                                                                                                       ↑
-   DR_LINK_MASS_RANGE = [0.8, 1.2]      # ±20% per link
-   DR_FRICTION_RANGE = [0.4, 1.2]       # range coefficiente attrito
-   DR_PUSH_INTERVAL = 200               # step tra push                                                                   ↑
-   DR_PUSH_VEL_XY = [0.0, 0.8]         # m/s impulso laterale
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/mdp/events.py
-   Aggiungere funzioni randomize_physics_mass(), randomize_friction(), push_robot_velocity() seguendo il pattern delle funzioni randomize esistenti.
-
-   ---
-   Feature 7 — Task Family Structure (Multi-Task)                                                                         ↑
-
-   Priorità: BASSA | Rischio: BASSO | Dipendenze: Feature 2
-                                                                                                                          ↑
-   Perché
-                                                                                                                          ↑
-   HoST ha task separati: GetUp_Ground, GetUp_Prone, GetUp_Platform, GetUp_Slope, GetUp_Wall. Ogni task ha la stessa struttura MDP ma config diversa (init pose, terrain, reward weights, forza assistenza). Questa separazione permette curriculum progressivo.
-
-   Struttura File                                                                                                         ↑
-
-   unitree_rl_mjlab/src/tasks/getup/
-   ├── config/g1/                                                                                                         ↑
-   │   ├── env_cfgs.py          # ← attuale (GetUp_Ground, supine+prone)
-   │   ├── env_cfgs_prone.py    # ← solo prone, assistenza maggiore
-   │   ├── env_cfgs_side.py     # ← solo lato, task più difficile                                                         ↑
-   │   └── env_cfgs_wall.py     # ← con wall terrain, init crouched
-                                                                                                                          ↑
-   File: unitree_rl_mjlab/src/tasks/getup/config/g1/env_cfgs_prone.py
-   class G1GetUpEnvCfgProne(G1GetUpEnvCfg):
-       init_pose_probs = [0.0, 1.0, 0.0, 0.0]  # solo PRONE
-       assistance_curriculum: AssistanceCurriculumCfg = AssistanceCurriculumCfg(
-           initial_force_n=100.0,  # più alta per prone (più difficile)                                                   ↑
-           no_orientation_check=True,  # come HoST prone config
-       )                                                                                                                  ↑
-
-   File: unitree_rl_mjlab/unitree_rl_mjlab/tasks/__init__.py (o equivalente)                                              ↑
-   Registrare task ID aggiuntivi:
-   "Unitree-G1-GetUp-Prone", "Unitree-G1-GetUp-Side", "Unitree-G1-GetUp-Wall"                                             ↑
-
-   ---
-   Feature 8 — Terrain Variants
-
-   Priorità: BASSA | Rischio: ALTO | Dipendenze: Feature 7                                                                ↑
-
-   Perché
-                                                                                                                          ↑
-   IsaacLab supporta generazione procedurale di terreni via TerrainImporterCfg. HoST ha slope, platform e wall come mesh trimesh. In MuJoCo i terreni si definiscono come heighfield o mesh inclusi nella scene XML.                            ↑
-
-   Implementazione
-
-   Step 1 — Slope:
-   Generare un piano inclinato (5-15°) come <geom type="plane" ...> nel scene XML con rotazione, o usare HeightFieldTerrainCfg se disponibile in IsaacLab con backend MuJoCo.
-
-   Step 2 — Platform:                                                                                                     ↑
-   Aggiungere <geom type="box"> al di sopra del piano base nel scene XML per piattaforme elevate.
-
-   Step 3 — Wall:                                                                                                         ↑
-   Aggiungere parete verticale <geom type="box" size="0.05 2.0 1.5"> a distanza appropriata.
-                                                                                                                          ↑
-   File scene da creare:
-   unitree_rl_mjlab/src/assets/robots/unitree_g1/xmls/                                                                    ↑
-   ├── scene_g1.xml          # ← attuale (piano piatto)
-   ├── scene_g1_slope.xml    # ← piano inclinato 10°
-   ├── scene_g1_platform.xml # ← piattaforma elevata
-   └── scene_g1_wall.xml     # ← con parete                                                                               ↑
-
-   Nota: Questa feature ha il rischio maggiore perché richiede modifiche XML e test fisici approfonditi. Da fare solo dopo che tutte le altre feature sono stabili.                                                                               ↑
-
-   ---                                                                                                                    ↑
-   Ordine di Implementazione Consigliato
-                                                                                                                          ↑
-   ┌─────┬─────────────────────────────┬─────────────┬─────────────────┬───────────────────────────────────────┐
-   │  #  │           Feature           │ Ore stimate │   Dipendenze    │                 Note                  │
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤
-   │ 1   │ Style Rewards               │ 3-4h        │ —               │ Inizia da qui, massimo valore/rischio │          ↑
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤
-   │ 2   │ Extended Init Positions     │ 2-3h        │ —               │ Trovare quaternion via viewer         │          ↑
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤
-   │ 3   │ Keypoints Anatomici         │ 4-5h        │ —               │ Fondamentale per feature future       │          ↑
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤
-   │ 4   │ Assistance Curriculum       │ 5-6h        │ —               │ Più impattante per convergenza        │          ↑
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤
-   │ 5   │ Extended DR                 │ 2-3h        │ run stabile     │ Attivare uno per volta                │
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤
-   │ 6   │ Task Family Structure       │ 2h          │ #2              │ Solo refactoring organizzativo        │
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤          ↑
-   │ 7   │ Staged Reward Restructuring │ 4-5h        │ #1, run stabile │ Rischio più alto, dopo convergenza    │
-   ├─────┼─────────────────────────────┼─────────────┼─────────────────┼───────────────────────────────────────┤
-   │ 8   │ Terrain Variants            │ 6-8h        │ #6              │ Per ultimo, più complesso             │          ↑
-   └─────┴─────────────────────────────┴─────────────┴─────────────────┴───────────────────────────────────────┘
-                                                                                                                          ↑
-   ---
-   File Critici da Modificare
-
-   ┌─────────────────────────────────────────────────┬────────────────────┐
-   │                      File                       │      Feature       │                                               ↑
-   ├─────────────────────────────────────────────────┼────────────────────┤
-   │ src/tasks/getup/mdp/rewards.py                  │ #1, #5, #7         │
-   ├─────────────────────────────────────────────────┼────────────────────┤                                               ↑
-   │ src/tasks/getup/mdp/events.py                   │ #2, #4, #6         │
-   ├─────────────────────────────────────────────────┼────────────────────┤
-   │ src/tasks/getup/mdp/observations.py             │ #3                 │
-   ├─────────────────────────────────────────────────┼────────────────────┤
-   │ src/tasks/getup/mdp/metrics.py                  │ #1, #4             │                                               ↑
-   ├─────────────────────────────────────────────────┼────────────────────┤
-   │ src/tasks/getup/getup_env_cfg.py                │ #1, #3, #4, #5, #7 │
-   ├─────────────────────────────────────────────────┼────────────────────┤
-   │ src/tasks/getup/config/g1/env_cfgs.py           │ #2, #4, #5, #6     │
-   ├─────────────────────────────────────────────────┼────────────────────┤
-   │ src/assets/robots/unitree_g1/g1_constants.py    │ #2, #3             │
-   ├─────────────────────────────────────────────────┼────────────────────┤
-   │ src/assets/robots/unitree_g1/xmls/g1.xml        │ #3, #8             │
-   ├─────────────────────────────────────────────────┼────────────────────┤                                             │ src/tasks/getup/config/g1/env_cfgs_*.py (nuovi) │ #6, #8             │
-   └─────────────────────────────────────────────────┴────────────────────┘
-
-   ---
-   Verifica (Come testare ogni feature)
-
-   1. Style Rewards: smoke test (10 iter, cpu) — TensorBoard style/* non NaN, valori negativi piccoli
-   2. Init Positions: --viewer native — visivamente le 4 pose sembrano corrette fisicamente
-   3. Keypoints: aggiungere print(env.scene.robot.data.body_pos_w.shape) per verificare indici
-   4. Assistance Curriculum: TensorBoard curriculum/assistance_force_mean deve decrescere nel tempo
-   5. DR: smoke test con DR attivo — nessun NaN, joint_vel_explosion non aumenta > 5%
-   6. Terrains: viewer con ogni scene XML — robot non compenetra geometria
-
-   ---
-   Dipendenza API Critica da Verificare                                                                             
-   Prima di implementare l'Assistance Curriculum, verificare quale API IsaacLab è disponibile:
-   python -c "from isaaclab.assets import Articulation; print(dir(Articulation))" | grep -i force
- Cercare: apply_external_force_and_torque, external_force_b, o set_external_force.
+# G1 Get-Up — Complete Implementation & Research Roadmap
+
+This file has two parts:
+
+- **Part 1 — XML Migration Pipeline.** Engineering steps to move the get-up training onto the real official G1 model (`g1_body29_hand14.xml`, 43 DOF) under one unified policy.
+- **Part 2 — Research-Grounded Policy Enhancements.** The literature-backed ideas to layer on top of the working HoST baseline to move from "a standup" to a *robust, smooth standup usable in many scenarios*. Each idea is documented with its reference paper, the idea taken, the reason, what it adds, and implementation notes.
+
+**Recommended global ordering:** complete Part 1 (migrate XML → smoke test → fresh Phase-1 baseline) **first**, then layer Part 2 enhancements one at a time. Do **not** introduce new reward terms or critic inputs in the same run as the `29→43` action-space change — otherwise regressions cannot be attributed.
+
+---
+---
+
+# PART 1 — XML Migration Pipeline (`g1_body29_hand14.xml`, 43-DOF Unified Policy)
+
+## Context & Goal
+
+Migrate get-up training from the old model `unitree_g1/xmls/g1.xml` (29 DOF, simplified rubber hands) to the official model `g1/g1_body29_hand14.xml` (29 body + 14 hand DOF = 43 total) with correctly articulated fingers.
+
+**Decision (confirmed):** all joints — including the 14 finger joints — are controlled by a **single unified RL policy**. The policy learns to keep the fragile hands away from the ground via a contact-force penalty. This is the cleanest path for sim2real: one policy, one controller, no parallel hand controller.
+
+**Cost:** action space grows `29 → 43`; existing 29-DOF checkpoints become incompatible. Training restarts from scratch at Phase 1.
+
+## ⚠️ Three Corrections vs. the Earlier Draft (read first)
+
+### 1. The mjlab training XML must have **NO `<actuator>` block** at all
+The current working `g1.xml` contains zero `<actuator>` elements (`grep -c "<actuator>"` → `0`). `mjlab` builds position actuators from `BuiltinPositionActuatorCfg` groups in `g1_constants.py`. The new XML ships a 43-entry `<motor>` torque block that would collide/duplicate with mjlab's actuators. **Delete the whole `<actuator>` block.** Hands become a position-control group in `g1_constants.py`. This supersedes the earlier back-and-forth about adding/removing hand motors — that block is going away entirely.
+
+### 2. The mesh / asset path needs a one-line fix
+`get_assets()` in `g1_constants.py` uses `"assets"` but ignores its `meshdir` argument. The new model lives at `g1/` with `meshdir="meshes"` and STLs in `g1/meshes/`. Without a fix, asset loading looks in the wrong place.
+
+### 3. The hand-contact penalty is almost free
+The body-part contact sensors `contact_hand_left` / `contact_hand_right` already exist in `env_cfgs.py` (lines ~270–285). We only need a small reward function reading them, mirroring the existing `head_contact_penalty` in `rewards.py`. No new sensor wiring.
+
+## Collision-geom architecture
+
+`g1_constants.py` `FULL_COLLISION` matches geoms by name regex `.*_collision` and overrides their `condim`, `friction`, `priority`, `contype`. The body-part `ContactSensorCfg`s in `env_cfgs.py` also reference these geoms by exact name. So the new XML must contain named collision geoms identical to:
+
+```
+pelvis_collision, torso_collision, head_collision,
+(left|right)_hip_collision, (left|right)_thigh_collision, (left|right)_shin_collision,
+(left|right)_linkage_brace_collision, (left|right)_elbow_yaw_collision,
+(left|right)_wrist_collision, (left|right)_foot[1-7]_collision
+```
+
+The XML only needs the right name + geometry; `condim`/`friction` are set by `FULL_COLLISION` and may be omitted in the XML.
+
+## Implementation Steps
+
+All XML edits are in `src/assets/robots/unitree_g1/xmls/g1_body29_hand14.xml` unless noted.
+
+### Step 1 — Edit the new XML
+
+**1a. Delete the entire `<actuator>` block.** Remove every `<motor>` element; mjlab creates position actuators itself. *Motivation:* avoids duplicate/conflicting actuators; matches how `g1.xml` works today.
+
+**1b. Replace the `<sensor>` block** with the names the code reads (`robot/imu_lin_acc`, `robot/imu_lin_vel`, `robot/imu_ang_vel`):
+```xml
+<sensor>
+  <gyro          name="imu_ang_vel"  site="imu_in_pelvis"/>
+  <velocimeter   name="imu_lin_vel"  site="imu_in_pelvis"/>
+  <accelerometer name="imu_lin_acc"  site="imu_in_pelvis"/>
+  <subtreeangmom name="root_angmom"  body="pelvis"/>
+</sensor>
+```
+*Motivation:* the new XML is mjx-style with non-matching names; sensors are looked up by name at runtime.
+> **Note for Part 2:** `subtreeangmom name="root_angmom"` is already the **angular part of the centroidal momentum** — Enhancement 2 reuses it. Consider adding `subtreecom` and `subtreelinvel` here at the same time (see Part 2, Enhancement 2).
+
+**1c. Add named collision geoms** (copy verbatim from `g1.xml`):
+
+| Body | Geom(s) |
+|---|---|
+| `pelvis` | `pelvis_collision`, capsule, `size="0.07"`, `pos="0 0 -0.08"` |
+| `left/right_hip_roll_link` | `*_hip_collision`, capsule, `size="0.06"`, `fromto="0.02 0 0 0.02 0 -0.08"` |
+| `left/right_hip_yaw_link` | `*_thigh_collision`, capsule, `size="0.055"`, `fromto="-0.0 0 -0.03 -0.06 0 -0.17"` |
+| `left/right_knee_link` | `*_shin_collision` + `*_linkage_brace_collision`, `size="0.03"` |
+| `torso_link` | `torso_collision`, capsule, `size="0.09"` + `head_collision`, sphere, `size="0.06"`, `pos="0 0 .43"` |
+| `left/right_elbow_link` | `*_elbow_yaw_collision`, capsule, `size="0.035"` |
+| `left/right_wrist_pitch_link` | `*_wrist_collision`, capsule, `size="0.035"` |
+| `left/right_wrist_yaw_link` | `*_hand_collision`, capsule, `size="0.035"` |
+
+`condim`/`friction` are applied by `FULL_COLLISION`, so geoms can be plain `type="capsule"`/`type="sphere"`.
+
+**1d. Replace foot geoms + add foot sites.** In `left/right_ankle_roll_link`: delete the 4 anonymous `<geom size="0.005" .../>` spheres; add the 7 named foot capsules `*_foot[1-7]_collision`; add `<site name="left_foot"/>` / `<site name="right_foot"/>`. Copy from `g1.xml` lines 99–106 / 141–148. *Motivation:* `stand_on_feet`, `feet_ground_contact`, and `FEET_ONLY_COLLISION` key off these exact names/sites.
+
+**1e. Add palm sites.** `<site name="left_palm" pos="0 0 0"/>` inside `left_wrist_yaw_link`; mirror for right. *Motivation:* parity with `g1.xml`; referenced by some scripts.
+
+**1f. Add `<contact>` excludes:**
+```xml
+<contact>
+  <exclude body1="left_elbow_link"  body2="left_wrist_pitch_link"/>
+  <exclude body1="right_elbow_link" body2="right_wrist_pitch_link"/>
+  <exclude body1="pelvis"           body2="right_hip_roll_link"/>
+  <exclude body1="pelvis"           body2="left_hip_roll_link"/>
+</contact>
+```
+
+**1g. Remove embedded scene setup:** delete the trailing `<statistic>`, `<visual>`, second `<asset>` (sky/ground textures), and second `<worldbody>` (light + floor geom). *Motivation:* mjlab/the scene file provide their own ground & lighting; a floor inside the robot XML would duplicate the environment floor.
+
+### Step 2 — `g1_constants.py`
+
+**2a. Point `G1_XML` at the new file** (lines 25–27):
+```python
+G1_XML: Path = SRC_PATH / "assets/robots/unitree_g1/xmls/g1_body29_hand14.xml"
+```
+
+**2b. Fix `get_assets()` to honor `meshdir`** (line 33):
+```python
+assets_dir = G1_XML.parent / meshdir   # was: / "assets"
+```
+
+**2c. Add a hand actuator group.** The 14 finger joints are small motors (XML `actuatorfrcrange` ±1.4 Nm; `thumb_0` ±2.45 Nm). Add a `BuiltinPositionActuatorCfg` with low stiffness so the policy can pose fingers but not fight obstacles:
+```python
+G1_ACTUATOR_HAND = BuiltinPositionActuatorCfg(
+    target_names_expr=(".*_hand_.*_joint",),
+    stiffness=5.0,          # pose fingers gently rather than fight obstacles
+    damping=0.2,
+    effort_limit=1.4,       # matches XML cap; thumb_0 is 2.45 but 1.4 is safe/uniform
+    armature=...,           # BuiltinPositionActuator reflected_inertia
+)
+```
+Add it to both articulations (the get-up task uses `HOST`): `G1_ARTICULATION.actuators`, `G1_ARTICULATION_HOST.actuators` (line ~503), and the delayed variant in `get_g1_supine_robot_cfg_with_delay()` if DR action-delay is used. *Motivation:* every joint must be actuated or it flops; `G1_ACTION_SCALE` is auto-derived from `G1_ARTICULATION.actuators`, so the action vector updates automatically to 43 outputs.
+
+**2d. Optional hand keyframe defaults.** Finger joints not listed in keyframe dicts default to `0.0` (relaxed/open), a safe home target. Leave as-is unless a visual check shows a bad rest pose.
+> **Note for Part 2:** this same keyframe machinery is what Enhancement 4 (Key State Initialization) reuses to seed diverse start postures.
+
+### Step 3 — Hand-contact penalty reward
+
+**3a. Add reward in `src/tasks/getup/mdp/rewards.py`** (mirror `head_contact_penalty`, ~line 193), reading `contact_hand_left` / `contact_hand_right` via `_contact_force_norm` (line 28), with a reset-ramp mask so settling contacts are not punished:
+```python
+def hand_contact_penalty(env, ramp_steps=...):
+    l, _ = _contact_force_norm(env, "contact_hand_left")
+    r, _ = _contact_force_norm(env, "contact_hand_right")
+    return (l | r).float() * _reset_ramp(env, ramp_steps)
+```
+
+**3b. Register in `getup_env_cfg.py`:**
+```python
+"reg_hand_contact": RewardTermCfg(
+    func=mdp.hand_contact_penalty,
+    weight=-5.0,
+    params={...},
+)
+```
+Start at `-5.0`; tune up if the policy still uses hands.
+
+**3c. Map to a group in `src/tasks/getup/rl/reward_groups.py`:**
+```python
+"reg_hand_contact": "regularization"
+```
+*Motivation:* `build_group_onehot` raises if any active term is unmapped.
+> **Note for Part 2:** this is your **first concrete contact-control reward**. It belongs to the same theme that Enhancements 2 and 3 generalize (controlling *which* contacts the policy uses, not just how smooth it is).
+
+### Step 4 — Visualization model `scene_g1.xml`
+
+The standalone scripts (`pose_lab.py`, `visualize_keyframes.py`, `diag_contact_geoms.py`, …) and `simulate/config.yaml` use `unitree_g1/xmls/scene_g1.xml`, which embeds its own body + `<actuator>` block. Lowest-risk: create a parallel `scene_g1_hand14.xml` that includes the new body + ground/light, and point `simulate/config.yaml` at it when visualizing this model. Visualization only; does not affect training; deferrable until after training works.
+
+### Step 5 — Verification
+
+```bash
+cd ~/Standup/Standup_G1/unitree_rl_mjlab
+```
+
+**5a. Asset + actuator sanity (via mjlab spec):**
+```bash
+python -c "
+from src.assets.robots.unitree_g1.g1_constants import get_spec, G1_ARTICULATION
+import mujoco
+m = get_spec().compile()
+print('nq', m.nq, 'nv', m.nv, 'nu', m.nu)   # expect nv=49, nu=43 after mjlab adds actuators
+"
+```
+
+**5b. Visual check** (fingers, named collision geoms, foot sites):
+```bash
+python -m src.assets.robots.unitree_g1.g1_constants
+```
+
+**5c. Short training smoke test** (catches action-size + new reward term):
+```bash
+nohup env MUJOCO_GL=egl python scripts/train.py Unitree-G1-GetUp \
+  --agent.max-iterations=10 \
+  --env.scene.num-envs=16 \
+  > logs/test_new_xml.log 2>&1
+cat logs/test_new_xml.log
+```
+Expect action dim 43 and no missing-geom / unmapped-reward errors.
+
+### Step 6 — Fresh Phase-1 training (43 DOF)
+
+```bash
+nohup env MUJOCO_GL=egl python scripts/train.py Unitree-G1-GetUp \
+  --agent.experiment-name=g1_getup \
+  --agent.run-name="Phase1_43dof" \
+  --agent.max-iterations=4000 \
+  --env.scene.num-envs=4096 \
+  > logs/train_phase1_43dof.log 2>&1 &
+disown
+```
+
+### Part 1 Progress Tracker
+
+| # | Step | File | Status |
+|---|---|---|---|
+| 1a | Delete `<actuator>` block | `g1_body29_hand14.xml` | ☐ |
+| 1b | Fix sensor names (+`velocimeter`, +`root_angmom`) | `g1_body29_hand14.xml` | ☐ |
+| 1c | Add named collision geoms | `g1_body29_hand14.xml` | ☐ |
+| 1d | Replace foot geoms + foot sites | `g1_body29_hand14.xml` | ☐ |
+| 1e | Add palm sites | `g1_body29_hand14.xml` | ☐ |
+| 1f | Add `<contact>` excludes | `g1_body29_hand14.xml` | ☐ |
+| 1g | Remove embedded scene setup | `g1_body29_hand14.xml` | ☐ |
+| 2a | Point `G1_XML` to new file | `g1_constants.py` | ☐ |
+| 2b | Fix `get_assets()` meshdir | `g1_constants.py` | ☐ |
+| 2c | Add hand actuator group (both articulations) | `g1_constants.py` | ☐ |
+| 2d | Optional hand keyframe defaults | `g1_constants.py` | ☐ |
+| 3a | `hand_contact_penalty` | `rewards.py` | ☐ |
+| 3b | Register `reg_hand_contact` term | `getup_env_cfg.py` | ☐ |
+| 3c | Map term to `regularization` group | `rl/reward_groups.py` | ☐ |
+| 4 | Visualization scene file (`scene_g1_hand14.xml`) | new | ☐ (deferrable) |
+| 5a | Spec parse check (`nv=49`, `nu=43`) | — | ☐ |
+| 5b | Visual check | — | ☐ |
+| 5c | Smoke training (10 iters) | — | ☐ |
+| 6 | Fresh Phase-1 training | — | ☐ |
+
+### Part 1 Risk Notes
+- Action dim `29 → 43` ⇒ checkpoints incompatible (intended; fresh training).
+- Hand subtree mass now distributed into finger bodies; total mass correct but dynamics differ slightly.
+- New `left/right_wrist_yaw_link` inertia differs from `g1.xml` (which folded hand mass into the wrist); with real finger bodies this is now physically correct.
+
+---
+---
+
+# PART 2 — Research-Grounded Policy Enhancements
+
+## Where we are, and the goal
+
+**Baseline (already implemented):** HoST multi-critic get-up. It produces *a* standup, but it is rough on (1) **motion quality** ("not the best in terms of movement"), (2) **contact behavior** across surfaces, and (3) **generalization** across terrains and starting postures.
+
+**Goal:** a *smooth, contact-sensible, robust* standup that works in many scenarios — not just on open flat ground from a supine pose.
+
+**Diagnostic principle.** These three gaps have different root causes and different fixes, so treat them separately rather than throwing one bigger reward at all of them:
+- *Motion quality* → architecture/reward fix (cheap) → Enhancement 1.
+- *Contact behavior* → balance/contact-aware critic (medium) → Enhancements 2 & 3.
+- *Posture/terrain coverage* → curriculum + state initialization (sim-budget) → Enhancements 3 & 4.
+- *Hardware safety* → safety filtering (gate before real robot) → Enhancement 5.
+
+## What from HoST is already doing the heavy lifting (keep all of it)
+
+These three HoST mechanisms are the foundation Part 2 builds on; do not remove them:
+1. **Multi-critic architecture** — separate critics per reward group, so dense regularization and sparse task rewards don't cross-talk. This is the platform every enhancement below plugs into.
+2. **Action rescaler β** — `pd_t = p_t + β·a_t`, with `a_t ∈ [−1,1]`, where β tightens over training to implicitly bound joint speed/torque and suppress violent motion.
+   - **Verify in your code:** β must decrease **coupled to task progress** (HoST drops it only *after* the head reaches target height), **not** on a flat wall-clock schedule. Task-coupling is what prevents tightening from killing exploration before a working trajectory exists. A time-based decay loses this property.
+3. **Smoothness regularization** — penalizes oscillation in the action sequence.
+
+> Enhancement 1 (LCP) stacks *with* β and smoothness; they act at different levels (β bounds action magnitude, smoothness penalizes oscillation in reward, LCP constrains the policy function's sensitivity). They are complementary, not redundant.
+
+---
+
+## Enhancement 1 — Lipschitz-Constrained Policies (LCP)
+
+**Reference.** Chen, He, et al., *Learning Smooth Humanoid Locomotion through Lipschitz-Constrained Policies*, arXiv:2410.11825 (IROS 2025). Code: `github.com/zixuan417/smooth-humanoid-locomotion`.
+
+**Idea to take.** Add a differentiable Lipschitz (gradient-penalty) constraint to the policy during training, bounding how fast the policy output can change with respect to input changes. This produces inherently smooth motion at the *function* level, instead of relying on a large set of hand-tuned smoothness reward weights.
+
+**Why I want it.** My current standup is jerky — the classic "many actuators + high torque limits → violent motion" failure. HoST's β + smoothness reward help but are brittle and need per-platform tuning. The LCP paper's own motivation is exactly this: smoothness rewards/low-pass filters require tedious, platform-specific hyperparameter tuning. A Lipschitz constraint addresses smoothness directly and transfers better.
+
+**What it adds.** Cleaner, more natural motion; better sim2real (smooth policies transfer more reliably); less reward-weight babysitting. It is the cheapest high-signal change, and a smoother base policy makes every downstream curriculum easier to debug (noisy base policies make terrain/posture failures ambiguous).
+
+**Implementation notes.**
+- Add the gradient-penalty term to the PPO policy loss; keep β and smoothness as-is. Tune a single coefficient `λ_Lipschitz`.
+- Touchpoint: the agent/PPO loss in the RL training code (not the env/reward configs).
+- This is a training-loop change, **not** new simulation infrastructure → do it **first**, right after the 43-DOF baseline is stable.
+- Ablate: same seed/config with and without LCP; compare action-rate spectra and torque profiles, not just success rate.
+
+---
+
+## Enhancement 2 — Balance-Embedding Asymmetric Critic (Capture Point / CoM / Centroidal Momentum)
+
+**Reference.** Poddar, McCrory, Penco, et al., *Embedding Classical Balance Control Principles in Reinforcement Learning for Humanoid Recovery*, arXiv:2603.08619 (2026).
+
+**Idea to take.** Feed **privileged physics** the robot cannot measure on hardware — **Capture Point (CP)**, **CoM state**, and **Centroidal Momentum** — into the **critic only** (asymmetric actor–critic), and shape reward around whether whole-body momentum is trending toward a recoverable/stable state. The **actor stays proprioception-only** for zero-shot hardware transfer.
+
+**Why I want it.** Sparse task reward tells the policy *whether* it stood up, not *how close to recoverable* its current momentum is. The balance metrics give an explicit, dense "distance-to-stability" learning signal that lets the critic value good whole-body coordination. The paper's ablation is the key evidence: **removing the balance structure makes standup learning fail entirely** — so this is structural, not cosmetic. As a bonus, these metrics can **replace HoST's artificial vertical pulling force F**, which is cleaner for sim2real (no artificial force to wean the policy off).
+
+**What it adds.** (a) Better whole-body coordination and contact sensibility; (b) the value signal that makes Enhancement 3 (obstacle reconfiguration) *learnable* — the critic can reward a body reconfiguration that doesn't immediately change task reward but improves recoverability; (c) a path to drop the artificial force F.
+
+**Implementation notes.**
+- **Asymmetric critic:** add CP/CoM/centroidal-momentum to the **critic observation group**, never the policy observation group (mjlab keeps these as separate obs groups).
+- **Sensors you can reuse / add (XML `<sensor>` block, Part 1 Step 1b):**
+  - `subtreeangmom` (`root_angmom`) — **already being added** → angular part of centroidal momentum.
+  - add `subtreecom` → CoM position; add `subtreelinvel` → CoM linear velocity (linear momentum ∝ `m · v_com`).
+- **Capture Point (LIP model):** `ξ_xy = x_com,xy + v_com,xy / ω`, with `ω = sqrt(g / z_com)`. Feed `ξ`, and the signed distance from `ξ` to the support polygon, to the critic.
+- **Centroidal momentum:** `h = [k ; l]` (angular `k` from `subtreeangmom` about the CoM; linear `l = m · v_com`).
+- **Reward shaping (new critic group):** reward CP moving toward the support region and momentum trending toward the upright recoverable set; map the new term in `reward_groups.py` (every active term must be mapped or `build_group_onehot` raises).
+- **Phasing out F:** bring CP/momentum signals online first, then taper F. **Do not run F and the balance reward at full strength simultaneously** — they fight.
+- Priority: **second** (right after LCP). Highest-value architectural add; everything contact-related depends on it.
+
+---
+
+## Enhancement 3 — Obstacle-Robust "Reconfigure-and-Retry" *(my idea — intuition kept, implementation evolved)*
+
+**Supporting references.** HoST terrain training (Huang et al., arXiv:2502.08378); balance-embedding critic (arXiv:2603.08619); robust blind-locomotion-via-randomized-obstacles literature (policies learn recovery by repeatedly colliding with randomized obstacles under proprioception).
+
+**The idea (preserved).** A truly real-world-robust humanoid should behave like a human: **when a movement is blocked by an obstacle, it should move *other* body parts to reach a new feasible configuration, then re-attempt the standup.** This reconfigure-and-retry behavior is the core capability I want, because it is what separates a demo-only standup from one that works "in every scenario."
+
+**Evolution of the implementation (and why).** My original plan was to *detect* obstacles by comparing **desired vs actual joint torque**, and after `n` blocked steps trigger a "move other parts" response. I'm dropping that detector, for two concrete reasons:
+1. **The signal is ambiguous.** Under PD control, a blocked joint shows up as position-tracking error + torque saturation — but that is *exactly* the normal signature of pushing against the **ground** during a legitimate standup. The robot pushes on things for almost the entire get-up. A torque-saturation detector therefore fires constantly and cannot separate "good contact (floor)" from "bad contact (obstacle)."
+2. **A hand-coded detect→trigger state machine is brittle** — it needs a threshold `n`, a torque threshold, and a hand-designed "what to move next" response, none of which generalize.
+
+**Robust formulation (keep the behavior, make it emergent).** Don't detect obstacles explicitly. Make the policy *intrinsically* robust so reconfigure-and-retry **emerges** as a continuous behavior (no mode switching):
+1. **Randomize obstacles in the training distribution** — place small blocking geoms near the body at episode reset, on top of HoST's existing terrains (ground / platform / wall / slope). Curriculum on obstacle size/density (start trivial, scale up).
+2. **Keep the sparse "reached standing" goal reward dominant** — this *forces* the policy to find a way around whatever blocks it. Avoid over-shaping that would let it ignore obstacles.
+3. **Give the critic balance information (Enhancement 2)** — so it can value a reconfiguration that improves recoverability even when task reward hasn't moved yet. This is the mechanism that makes the behavior learnable.
+
+**Optional blockage signal — as an *observation*, never a reward trigger.** If I want the policy to have explicit evidence of being stuck, feed **accumulated joint position-tracking error** (`pd_t − p_t` over a sliding window) into the **policy observation**. That gives proprioceptive evidence "I'm not going where I commanded," and lets the policy *learn* a response rather than me specifying one. The G1's current-based torque estimate can be an observation too — but **never** as a reward-triggering obstacle detector.
+
+**What it adds.** The headline generalization improvement: genuine multi-scenario robustness, turning a brittle hand-coded rule into a learned, continuous behavior. It is also the **contact-minimization** story — combined with the hand-contact penalty (Part 1, Step 3) and balance critic, the policy learns to free itself with *appropriate, minimal* contact.
+
+**Implementation / exploration notes.**
+- Scene/terrain: extend the env scene config with randomized blocking objects at reset; reuse HoST's terrain-curriculum hooks for difficulty scheduling.
+- Keep sparse goal reward weight high relative to shaping terms.
+- Add position-tracking-error to the policy obs group (ablate on/off).
+- Pair tightly with Enhancement 2 — do not attempt this *before* the balance critic exists, or the policy lacks the value signal to learn reconfiguration.
+- Evaluate on **held-out obstacle configurations** never seen in training (this is the real test of "every scenario").
+- Priority: **third**; sim-budget heavy (random obstacles + random falls enlarges the state space — expect more H200 hours and use a difficulty curriculum to keep exploration tractable).
+
+---
+
+## Enhancement 4 — Key State Initialization (KSI) for Posture Coverage
+
+**Reference.** Chen, Wang, Luo, et al., *HiFAR: Multi-Stage Curriculum Learning for High-Dynamics Humanoid Fall Recovery*, arXiv:2502.20061 (IROS 2025).
+
+**Idea to take.** Instead of seeding episodes only from random joint perturbations, **initialize from a curated set of representative keyframes** (prone / supine / side fall poses) so training directly covers the hard, structured starting configurations.
+
+**Why I want it.** The "different starting positions" weakness comes from uniform random init under-sampling the structured fall postures that matter. Explicit keyframe init guarantees coverage and (per HiFAR) stabilizes and speeds convergence.
+
+**What it adds.** Direct coverage of the posture-generalization gap, with faster/more stable training — addresses exactly the "works from any pose" requirement.
+
+**Implementation notes.**
+- Reuse the mjlab **keyframe machinery you already touch** in Part 1 Step 2d. Define a keyframe pose set spanning supine/prone/side (and partially-seated if relevant).
+- Sample the initial state from this set at reset, with a curriculum (start near-supine → progressively add prone/side/asymmetric).
+- Touchpoint: the reset / initial-state distribution in the get-up env config.
+- Priority: **fourth**; parallelizable with Enhancement 3 (both modify the reset distribution / scene, so co-design them).
+
+---
+
+## Enhancement 5 — CBF-RL Safety Filtering *(gate before hardware, not a quality tool)*
+
+**Reference.** Yang, Werner, de Sa, Ames, *CBF-RL: Safety Filtering Reinforcement Learning in Training with Control Barrier Functions*, arXiv:2510.14959 (2025). Validated on **Unitree G1**.
+
+**Idea to take.** Enforce **Control Barrier Functions during training** (active safety filtering of rollouts + barrier-inspired rewards) so the deployed policy **internalizes** safety and needs **no runtime filter**.
+
+**Why I want it.** This is a **safety** tool, not a motion-quality tool — it will not make the standup better or more general, it will make it *safe to run on the real robot*. Before real-G1 trials I don't want exploratory standups self-colliding, hitting joint limits, or slamming the fragile articulated hands into the ground.
+
+**What it adds.** Hardware-safe deployment: internalized self-collision / joint-limit / dangerous-configuration avoidance, with no runtime overhead. Complements (does not improve) motion quality.
+
+**Implementation notes.**
+- Define CBFs for: self-collision, joint-limit margins, and (relevant to the new fragile hands) hand–floor proximity.
+- Add the barrier reward + filtered rollouts to the training loop.
+- Touchpoint: RL training loop + safety-constraint definitions.
+- Priority: **last** — gate this immediately before sim2real / hardware, not during the sim-quality phase.
+
+---
+
+## Logged for the future (out of current scope)
+
+- **VIGOR** — *Visual Goal-In-Context Inference for Unified Humanoid Fall Safety*, arXiv:2602.16511 (2026). Vision-guided contact selection + anticipation. Defer until there is a concrete cluttered-perception requirement; high implementation cost, low value for the current proprioceptive standup goal.
+- **Unified Fall-Safety Policy from a Few Demonstrations** — arXiv:2511.07407 (2025). "Recover *while falling*" (pre-impact regime), distinct from standup-from-ground. Future work; pairs naturally with VIGOR for the full fall→recover→stand continuum.
+- **ASAP** — *Aligning Simulation and Real-World Physics*, arXiv:2502.01143 (RSS 2025). Residual delta-action model to close the sim-to-real contact gap; validated on G1. **Study now**, implement at the hardware-gap stage (i.e., if the policy works in sim but degrades on the real robot).
+
+---
+
+## Consolidated Roadmap
+
+| Order | Enhancement | Closes which gap | Main touchpoints | Cost | Depends on |
+|---|---|---|---|---|---|
+| 0 | 43-DOF XML migration (Part 1) | correct model + fragile-hand contact | XML, `g1_constants.py`, `rewards.py` | medium | — |
+| 1 | Lipschitz-Constrained Policies | motion quality (smoothness) | PPO/agent loss | low | baseline |
+| 2 | Balance-embedding asymmetric critic | contact + coordination; drop force F | critic obs group, XML sensors, `reward_groups.py` | medium | LCP done |
+| 3 | Obstacle-robust reconfigure-and-retry | generalization across obstacles/contacts | scene/terrain cfg, policy obs (tracking err) | high (sim) | Enh. 2 |
+| 4 | Key State Initialization (HiFAR) | posture coverage | reset/init-state cfg, keyframes | medium (sim) | baseline (co-design w/ Enh. 3) |
+| 5 | CBF-RL safety filtering | hardware safety | training loop, CBF defs | medium | before hardware only |
+
+**Engineering hygiene reminder:** change one thing per training run where possible. Never combine the action-space migration (Part 1) with a new reward term or new critic input in the same run, or regressions become unattributable. Establish the 43-DOF Phase-1 baseline first, then introduce Enhancements 1→5 incrementally, ablating each against the previous checkpoint.
+
+## Part 2 Progress Tracker
+
+| # | Enhancement | Status |
+|---|---|---|
+| E0 | 43-DOF baseline trained & sane (Part 1 complete) | ☐ |
+| E1a | Add Lipschitz gradient-penalty to PPO loss | ☐ |
+| E1b | Ablate LCP vs β+smoothness (action-rate / torque profiles) | ☐ |
+| E2a | Add `subtreecom` / `subtreelinvel` sensors | ☐ |
+| E2b | Compute CP + centroidal momentum; add to **critic** obs only | ☐ |
+| E2c | Add balance reward term + map to new critic group | ☐ |
+| E2d | Taper / remove HoST vertical force F | ☐ |
+| E3a | Randomized blocking obstacles at reset (+ difficulty curriculum) | ☐ |
+| E3b | (Optional) position-tracking-error → policy obs | ☐ |
+| E3c | Held-out obstacle-config evaluation | ☐ |
+| E4a | Define supine/prone/side keyframe init set | ☐ |
+| E4b | Curriculum'd Key State Initialization at reset | ☐ |
+| E5 | CBF-RL safety filtering (pre-hardware gate) | ☐ |
+
+---
+
+## Reference List
+
+- HoST — Huang et al., *Learning Humanoid Standing-up Control across Diverse Postures*, arXiv:2502.08378 (RSS 2025). Code: `github.com/OpenRobotLab/HoST`.
+- LCP — Chen et al., *Learning Smooth Humanoid Locomotion through Lipschitz-Constrained Policies*, arXiv:2410.11825 (IROS 2025). Code: `github.com/zixuan417/smooth-humanoid-locomotion`.
+- Balance Principles — Poddar et al., *Embedding Classical Balance Control Principles in Reinforcement Learning for Humanoid Recovery*, arXiv:2603.08619 (2026).
+- HiFAR — Chen et al., *HiFAR: Multi-Stage Curriculum Learning for High-Dynamics Humanoid Fall Recovery*, arXiv:2502.20061 (IROS 2025). Code: `github.com/Hi-FAR/HiFAR`.
+- CBF-RL — Yang et al., *CBF-RL: Safety Filtering Reinforcement Learning in Training with Control Barrier Functions*, arXiv:2510.14959 (2025).
+- HumanUP — He et al., *Learning Getting-Up Policies for Real-World Humanoid Robots*, arXiv:2502.12152 (RSS 2025). Code: `github.com/RunpeiDong/humanup`.
+- VIGOR — *Visual Goal-In-Context Inference for Unified Humanoid Fall Safety*, arXiv:2602.16511 (2026).
+- Unified Fall-Safety — *Unified Humanoid Fall-Safety Policy from a Few Demonstrations*, arXiv:2511.07407 (2025).
+- ASAP — He et al., *Aligning Simulation and Real-World Physics for Learning Agile Humanoid Whole-Body Skills*, arXiv:2502.01143 (RSS 2025). Code: `github.com/LeCAR-Lab/ASAP`.

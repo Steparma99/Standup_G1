@@ -7,7 +7,7 @@ g1_constants.py.
 
 KEYS (inside the viewer window):
   Load a pose:
-    1  SUPINE     2  PRONE     3  HOME     4  KNEES_BENT
+    1  SUPINE     2  PRONE     3  HOME
     5  SIDE_LEFT  6  SIDE_RIGHT  7  SEATED
   Edit the pose LIVE (rotations are about the WORLD axes, 5 deg per press):
     W / S   pitch  + / -   (tilt forward / backward -- the supine<->prone axis)
@@ -19,11 +19,11 @@ KEYS (inside the viewer window):
     G   toggle COLLISION geoms (group 3) on/off  (see hand/head/foot capsules)
     0   reset to the loaded keyframe (undo your edits)
     C   print current pos/rot   (copy these into g1_constants.py)
-    J   print joint positions + reward diagnostics (see below)
+    I   print joint positions + reward diagnostics (see below)
     mouse = orbit / zoom camera
 
 After every edit it prints base_z, projected_gravity_b_z, foot heights, and
-ankle tilt metric (reward-relevant values). Press J for full joint list +
+ankle tilt metric (reward-relevant values). Press I for full joint list +
 computed reward values.
 
 Usage:
@@ -50,7 +50,6 @@ sys.path.insert(0, str(HERE.parent))  # make `import src...` work from anywhere
 
 from src.assets.robots.unitree_g1.g1_constants import (  # noqa: E402
     HOME_KEYFRAME,
-    KNEES_BENT_KEYFRAME,
     PRONE_KEYFRAME,
     SEATED_KEYFRAME,
     SIDE_LEFT_KEYFRAME,
@@ -58,16 +57,15 @@ from src.assets.robots.unitree_g1.g1_constants import (  # noqa: E402
     SUPINE_KEYFRAME,
 )
 
-XML_PATH = HERE.parent / "src/assets/robots/unitree_g1/xmls/scene_g1.xml"
+XML_PATH = HERE.parent / "src/assets/robots/g1/scene_g1_body29_hand14.xml"
 
 POSES = {
     ord("1"): ("SUPINE", SUPINE_KEYFRAME),
     ord("2"): ("PRONE", PRONE_KEYFRAME),
     ord("3"): ("HOME", HOME_KEYFRAME),
-    ord("4"): ("KNEES_BENT", KNEES_BENT_KEYFRAME),
-    ord("5"): ("SIDE_LEFT", SIDE_LEFT_KEYFRAME),
-    ord("6"): ("SIDE_RIGHT", SIDE_RIGHT_KEYFRAME),
-    ord("7"): ("SEATED", SEATED_KEYFRAME),
+    ord("4"): ("SIDE_LEFT", SIDE_LEFT_KEYFRAME),
+    ord("5"): ("SIDE_RIGHT", SIDE_RIGHT_KEYFRAME),
+    ord("6"): ("SEATED", SEATED_KEYFRAME),
 }
 
 ROT_STEP_DEG = 5.0
@@ -292,15 +290,23 @@ def _print_reward_diagnostics(model, data, joint_adr, base_quat, base_pos: np.nd
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # MuJoCo's C layer captures fd 1 (stdout) after launch_passive opens; all
+    # Python-level buffering fixes (reconfigure, BufferedWriter.raw) are too late.
+    # Redirect to stderr (fd 2) which MuJoCo never touches → instant prints.
+    sys.stdout = sys.stderr
+
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="headless: print all poses and exit")
     parser.add_argument("--start", default="SUPINE", help="pose to start on")
     parser.add_argument("--collision", action="store_true",
                         help="start with collision geoms (group 3) visible")
+    parser.add_argument("--xml", default=None,
+                        help="override robot scene XML path (relative to repo root)")
     args = parser.parse_args()
 
-    model = mujoco.MjModel.from_xml_path(str(XML_PATH))
+    xml_path = (HERE.parent / args.xml) if args.xml else XML_PATH
+    model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
     joint_adr = joint_name_to_qposadr(model)
     free_adr = free_joint_qposadr(model)
@@ -345,7 +351,7 @@ def main() -> None:
         st["joints"] = dict(getattr(kf, "joint_pos", {}) or {})
         st["paused"] = True
         write_pose_to_data()
-        print(f"--> loaded {label}  (paused; edit W/S A/D Q/E Z/X, P=test, 0=reset, C=print, J=rewards)")
+        print(f"--> loaded {label}  (paused; edit W/S A/D Q/E Z/X, P=test, 0=reset, C=print, I=rewards)")
         report()
 
     # Headless check: print every pose and exit.
@@ -385,8 +391,7 @@ def main() -> None:
         print('    joint_pos={')
         for jname in sorted(joint_adr):
             val = float(data.qpos[joint_adr[jname]])
-            if abs(val) > 1e-6:  # skip near-zero joints
-                print(f'      "{jname}": {val:.4f},')
+            print(f'      "{jname}": {val:.4f},')
         print('    }')
         print("\n    ---- reward diagnostics (params from env_cfgs.py) ----")
         _print_reward_diagnostics(model, data, joint_adr, st["quat"], st["pos"])
@@ -401,7 +406,7 @@ def main() -> None:
         ord("Z"): lambda: shift_z(-Z_STEP),
         ord("X"): lambda: shift_z(+Z_STEP),
         ord("C"): print_values,
-        ord("J"): print_joints_and_rewards,
+        ord("I"): print_joints_and_rewards,
         ord("0"): lambda: load_keyframe(st["label"], st["kf"]),
     }
 

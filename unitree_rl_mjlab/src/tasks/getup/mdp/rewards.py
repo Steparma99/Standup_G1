@@ -222,6 +222,27 @@ def head_impact_penalty(
     return (excess / max(force_scale, 1e-6)) * _reset_ramp(env, ramp_steps)
 
 
+def hand_contact_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    free_force: float = 8.0,
+    force_scale: float = 10.0,
+    ramp_steps: int = 0,
+) -> torch.Tensor:
+    """Exponential penalty for hand-to-terrain contact force [B,].
+
+    Dead zone: force_norm <= free_force (hand's own weight ~7.65 N) → 0 penalty.
+    Above that: exp(excess / force_scale) - 1, growing exponentially.
+    Excess is clamped at 5×force_scale to prevent numerical overflow while
+    preserving the exponential shape in the relevant range (default: 8–58 N).
+    Use with a small negative weight (e.g. -0.1); at the 5× clamp the raw
+    output is exp(5)-1 ≈ 147, giving a max step penalty of ~14.7 at weight=-0.1.
+    """
+    _, force_norm = _contact_force_norm(env, sensor_name)
+    excess = torch.clamp(force_norm - free_force, min=0.0, max=5.0 * force_scale)
+    return (torch.exp(excess / force_scale) - 1.0) * _reset_ramp(env, ramp_steps)
+
+
 def _standing_gate(
     pelvis_height: torch.Tensor, threshold: float, band: float = 0.12
 ) -> torch.Tensor:

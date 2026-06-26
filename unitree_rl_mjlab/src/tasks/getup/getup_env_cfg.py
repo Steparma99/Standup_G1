@@ -87,6 +87,7 @@ def _get_actor_obs_terms() -> dict[str, ObservationTermCfg]:
         # full projected-gravity vector. noise ±0.05 (HoST roll/pitch noise).
         "base_roll_pitch": ObservationTermCfg(
             func=mdp.base_roll_pitch,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",))},
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
         "joint_pos": ObservationTermCfg(
@@ -185,10 +186,6 @@ def _get_privileged_critic_obs_terms() -> dict[str, ObservationTermCfg]:
         "head_height": ObservationTermCfg(
             func=mdp.head_height,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",))},
-        ),
-        "base_lin_vel": ObservationTermCfg(
-            func=mdp.builtin_sensor,
-            params={"sensor_name": "robot/imu_lin_vel"},
         ),
         "whole_body_com": ObservationTermCfg(
             func=mdp.whole_body_com,
@@ -747,6 +744,23 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=0.0,
             params={"sensor_name": "feet_ground_contact", "ratio": 3.0, "penalty": 0.0,
                     "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Hand contact: exponential penalty on contact force, active at ALL stages.
+        # Dead zone <= free_force (hand weight ~7.65 N) → 0 penalty; grows as
+        # exp(excess/force_scale)-1 above that. Capped internally at 5×force_scale
+        # to prevent overflow (raw max ≈ 147; weight -0.1 → max step penalty ≈ -14.7).
+        # Tune force_scale vs. contact/hand_*_force_max metrics once training starts.
+        "style_hand_left_contact": RewardTermCfg(
+            func=mdp.hand_contact_penalty,
+            weight=-0.1,
+            params={"sensor_name": "contact_hand_left",
+                    "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS},
+        ),
+        "style_hand_right_contact": RewardTermCfg(
+            func=mdp.hand_contact_penalty,
+            weight=-0.1,
+            params={"sensor_name": "contact_hand_right",
+                    "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS},
         ),
         # ===================================================================
         # REGULARIZATION group (HoST definitive), group weight 0.1: weak shaping

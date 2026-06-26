@@ -47,15 +47,19 @@ def base_roll_pitch(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Base roll and pitch from the root quaternion [B, 2] (HoST r_t, q_t).
+    """Base roll and pitch [B, 2] (HoST r_t, q_t).
 
-    HoST's state vector uses the base roll and pitch as two scalars (not the full
-    projected-gravity vector). Extrinsic-XYZ Euler from the root link quaternion;
-    yaw is intentionally dropped (the get-up task is yaw-invariant). Both angles
-    are in radians, wrapped to (-pi, pi].
+    When asset_cfg includes body_names (e.g. torso_link), reads the quaternion
+    of that body — matching the real G1 whose IMU is in the torso, not the pelvis.
+    Falls back to root_link_quat_w when no body is specified.
+    Yaw is intentionally dropped (the get-up task is yaw-invariant).
     """
     asset: Entity = env.scene[asset_cfg.name]
-    roll, pitch, _ = euler_xyz_from_quat(asset.data.root_link_quat_w)
+    if asset_cfg.body_ids:
+        quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :].squeeze(1)
+    else:
+        quat_w = asset.data.root_link_quat_w
+    roll, pitch, _ = euler_xyz_from_quat(quat_w)
     return torch.stack((roll, pitch), dim=-1)  # [B, 2]
 
 
