@@ -150,12 +150,18 @@ def stand_on_feet(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     foot_height_threshold: float = 0.1,
+    height_threshold: float = 0.50,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Reward when both feet are in ground contact and not elevated.
 
     Equivalent to HumanUP _reward_stand_on_feet.
     asset_cfg must specify site_names for left and right foot sites.
+
+    `height_threshold` gates the reward via _standing_gate: the reward only
+    starts fading in once the pelvis reaches ~(height_threshold - band/2) m and
+    is fully active above height_threshold. This prevents the exploit where the
+    policy learns to lie on the ground with feet touching the floor.
     """
     contact_sensor: ContactSensor = env.scene[sensor_name]
     assert contact_sensor.data.found is not None
@@ -172,7 +178,10 @@ def stand_on_feet(
     planted = in_contact & foot_low  # [B, N_feet]
     any_foot = planted.any(dim=1).float()  # [B]
     both_feet = planted.all(dim=1).float()  # [B]
-    return 0.5 * any_foot + 0.5 * both_feet
+
+    h = asset.data.root_link_pos_w[:, 2]
+    gate = _standing_gate(h, height_threshold, band=0.08)
+    return (0.5 * any_foot + 0.5 * both_feet) * gate
 
 
 def _reset_ramp(env: ManagerBasedRlEnv, ramp_steps: int) -> torch.Tensor | float:
