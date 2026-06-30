@@ -175,6 +175,22 @@ def feet_positions(
     return asset.data.site_pos_w[:, asset_cfg.site_ids, :3].flatten(start_dim=1)
 
 
+def body_keypoints(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """World-frame XYZ positions of anatomical keypoint bodies [B, N_bodies*3].
+
+    NOT YET WIRED into active critic observations. Infrastructure ready for the
+    final "reach HOME and maintain" task stage. Enable by adding an ObservationTermCfg
+    in _get_privileged_critic_obs_terms() with body_names=G1_CRITIC_KEYPOINTS.
+    Default selection (12 bodies → 36 dims): shoulders, elbows, wrists, hips, knees, ankles.
+    asset_cfg.body_names must be set per-robot (env_cfgs.py) via G1_CRITIC_KEYPOINTS.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    return asset.data.body_link_pos_w[:, asset_cfg.body_ids, :3].flatten(start_dim=1)
+
+
 def stage_gates(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,

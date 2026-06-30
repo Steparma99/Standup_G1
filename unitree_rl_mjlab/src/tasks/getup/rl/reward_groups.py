@@ -28,6 +28,8 @@ REWARD_GROUP_MAP: dict[str, str] = {
     # --- TASK (HoST definitive): high-level objectives, weight 1 each --------------
     "task_head_height": "task",
     "task_base_orientation": "task",
+    "task_head_contact": "task",
+    "task_head_impact": "task",
     # Stage-0 bootstrap: directional progress signals for floor-level learning.
     "height_progress": "task",
     "prone_recovery": "task",

@@ -642,12 +642,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         # Head height: f_tol(h_head, [lower, inf), margin=1, value=0.1). h_head uses
         # torso_link as a proxy (no separate head body); set per-robot (env_cfgs.py).
-        # lower=0.80: torso_link body origin at HOME (pelvis 0.757 + waist_roll offset 0.044).
+        # lower=0.794: torso_link at target standing (pelvis 0.75 + waist_roll offset 0.044).
         "task_head_height": RewardTermCfg(
             func=mdp.task_head_height,
             weight=1.0,
             params={
-                "lower": 0.80,
+                "lower": 0.794,
                 "margin": 1.0,
                 "value_at_margin": 0.1,
                 "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot (torso_link).
@@ -659,6 +659,23 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={"lower": 0.99, "margin": 1.0, "value_at_margin": 0.05,
                     "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Head protection: penalize any head-terrain contact and escalate on impacts.
+        # ramp_steps=20 matches _MASK_STEPS — settling contacts are not penalized.
+        "task_head_contact": RewardTermCfg(
+            func=mdp.head_contact_penalty,
+            weight=-0.5,
+            params={"sensor_name": "contact_head", "ramp_steps": 20},
+        ),
+        "task_head_impact": RewardTermCfg(
+            func=mdp.head_impact_penalty,
+            weight=-2.0,
+            params={
+                "sensor_name": "contact_head",
+                "force_threshold": _HEAD_IMPACT_PENALTY_THRESHOLD,
+                "force_scale": _HEAD_IMPACT_PENALTY_SCALE,
+                "ramp_steps": 20,
+            },
         ),
         # ===================================================================
         # STYLE group (HoST definitive): shape the motion. Binary deviation
@@ -806,7 +823,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Hard-wall joint position limit penalty (very high coefficient).
         "joint_pos_limits": RewardTermCfg(
             func=mdp.joint_pos_limits, weight=-1e2,
-            params={"asset_cfg": SceneEntityCfg("robot")},
+            # Finger joints (Dex3-1) have their XML range boundary at q=0; the 98%
+            # soft-factor moves it inward leaving q=0 just outside, firing a constant
+            # penalty regardless of pose. Exclude them: hand_contact_penalty + tiny
+            # effort limits (1.4 Nm) already cover finger protection.
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=("^(?!.*_hand_).*$",))},
         ),
         # Joint velocity limits: Σ clamp(|q̇| - limit, 0). weight -1.0 = HoST's
         # "-Σ[...] with weight 1" (penalty: the function returns the violation amount).

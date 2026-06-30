@@ -277,11 +277,31 @@ G1_ACTUATOR_HOST_ARM = BuiltinPositionActuatorCfg(
 )
 
 ##
+# Anatomical keypoints — body links used as critic observations and as the
+# geometric HOME reference for the final "maintain standing" task stage.
+# 12 bodies × 3 (XYZ) = 36 critic dims when enabled.
+# Wire into critic obs via mdp.body_keypoints + SceneEntityCfg(body_names=G1_CRITIC_KEYPOINTS).
+G1_CRITIC_KEYPOINTS: tuple[str, ...] = (
+  "left_shoulder_pitch_link",
+  "right_shoulder_pitch_link",
+  "left_elbow_link",
+  "right_elbow_link",
+  "left_wrist_yaw_link",
+  "right_wrist_yaw_link",
+  "left_hip_pitch_link",
+  "right_hip_pitch_link",
+  "left_knee_link",
+  "right_knee_link",
+  "left_ankle_pitch_link",
+  "right_ankle_pitch_link",
+)
+
+##
 # Keyframe config.
 ##
 
 HOME_KEYFRAME = EntityCfg.InitialStateCfg(
-  pos=(0, 0, 0.757),
+  pos=(0, 0, 0.75),
   joint_pos={
     ".*_hip_pitch_joint": -0.312,
     ".*_knee_joint": 0.669,
