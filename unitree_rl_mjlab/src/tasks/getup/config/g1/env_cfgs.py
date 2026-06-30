@@ -114,8 +114,8 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # contact = a missing reward/force signal. Raised with matching njmax headroom
     # (~4 constraint rows per contact, pyramidal cone). Watch the run for overflow
     # warnings: lower if memory-bound, raise further if they appear.
-    cfg.sim.nconmax = 150
-    cfg.sim.njmax = 600
+    cfg.sim.nconmax = 80
+    cfg.sim.njmax = 350
 
     # Robot spawns from SUPINE by default; the reset event below overrides the
     # pose every episode by sampling from the reference set. Uses the HoST PD
