@@ -1445,6 +1445,29 @@ def post_feet_yaw(
 
 
 _JOINT_VEL_LIMIT_CACHE = "_joint_vel_limit_cache"
+_ARM_VEL_SOFT_LIMIT_CACHE = "_arm_vel_soft_limit_cache"
+
+
+def arm_vel_soft_limit(
+    env: ManagerBasedRlEnv,
+    vel_limits: dict[str, float] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Soft arm velocity threshold: Σ_i clamp(|q̇_i| - limit_i, 0) [B,].
+
+    Same logic as joint_vel_limits but uses a separate cache so both terms can
+    coexist on the same env. Unmatched joints get limit 1e6 (never penalized).
+    Use a negative weight; the function returns a NON-NEGATIVE violation amount.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = getattr(env, _ARM_VEL_SOFT_LIMIT_CACHE, None)
+    if cache is None:
+        cache = torch.tensor(
+            [resolve_expr(vel_limits or {}, asset.joint_names, 1e6)], device=env.device
+        )  # [1, J]
+        setattr(env, _ARM_VEL_SOFT_LIMIT_CACHE, cache)
+    over = torch.clamp(asset.data.joint_vel.abs() - cache, min=0.0)
+    return torch.sum(over, dim=1)
 
 
 def joint_vel_limits(

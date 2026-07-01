@@ -56,6 +56,7 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "joint_power_l2": "regularization",
     "joint_vel_l2": "regularization",
     "reg_arm_vel": "regularization",
+    "reg_hand_vel": "regularization",
     "joint_tracking_error": "regularization",
     "joint_pos_limits": "regularization",
     "joint_vel_limits": "regularization",

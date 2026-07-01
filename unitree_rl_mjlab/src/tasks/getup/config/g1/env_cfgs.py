@@ -69,7 +69,7 @@ _BETA_CURRICULUM_ENABLE   = True
 _BETA_INITIAL             = 1.0
 _BETA_DECREMENT           = 0.02   # removed per successful episode (per env)
 _BETA_MIN                 = 0.25   # floor (HoST fixed-beta ablation value)
-_BETA_SUCCESS_HEAD_HEIGHT = 0.90   # torso_link (head proxy) height counting as "stood up"
+_BETA_SUCCESS_HEAD_HEIGHT = 0.75   # was 0.90 — lowered to H_STAGE2+0.10 so curriculum activates once robot learns to stand
 
 # ---------------------------------------------------------------------------
 # Reset drop + settling phase.

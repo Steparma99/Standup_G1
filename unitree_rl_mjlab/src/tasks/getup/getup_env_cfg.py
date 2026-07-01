@@ -803,13 +803,30 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_vel_l2, weight=-1e-4,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Arm-specific velocity penalty: calms shoulder/elbow/wrist flailing during the
-        # rise (the global joint_vel_l2 above is too weak to constrain the arms, and the
-        # only arm-posture term is gated to standing). Reuses the shared joint_vel_l2.
+        # Arm velocity soft threshold: penalizes only the excess above a comfortable
+        # swing speed (clamp(|q̇| - limit, 0)). Arms are free to move and assist
+        # the get-up but are penalized when they exceed the per-joint speed cap.
+        # Uses arm_vel_soft_limit (separate cache) to coexist with joint_vel_limits.
         "reg_arm_vel": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=0,  # phase 1: allow arms to assist rising
+            func=mdp.arm_vel_soft_limit,
+            weight=-1.0,
+            params={
+                "vel_limits": {
+                    ".*_shoulder_.*": 8.0,  # [rad/s] ~460 deg/s — generous swing range
+                    ".*_elbow_joint":  8.0,
+                    ".*_wrist_.*":     5.0,  # wrists slower: less leverage needed
+                },
+            },
+        ),
+        # Hand velocity penalty: keeps fingers still during the get-up phase.
+        # Velocity-only (not position) so trapped fingers under the torso do not
+        # create a position error that fights contact force through the low-effort
+        # (1.4 Nm) actuators. Policy stays 43-DOF and is directly deployable.
+        "reg_hand_vel": RewardTermCfg(
+            func=mdp.joint_vel_l2,
+            weight=-0.1,
             params={"asset_cfg": SceneEntityCfg(
-                "robot", joint_names=(".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"))},
+                "robot", joint_names=(r".*_hand_(thumb|middle|index)_\d_joint",))},
         ),
         # Strongest in the group: PD target-vs-measured gap (implicit effort penalty).
         # HoST uses -2.5e-4 here; the previous -2.5e-1 was 1000x harsher, which
