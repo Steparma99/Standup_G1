@@ -807,7 +807,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # rise (the global joint_vel_l2 above is too weak to constrain the arms, and the
         # only arm-posture term is gated to standing). Reuses the shared joint_vel_l2.
         "reg_arm_vel": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=-4e-3,
+            func=mdp.joint_vel_l2, weight=0,  # phase 1: allow arms to assist rising
             params={"asset_cfg": SceneEntityCfg(
                 "robot", joint_names=(".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"))},
         ),
