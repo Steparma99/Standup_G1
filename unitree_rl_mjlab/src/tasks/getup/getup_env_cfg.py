@@ -824,7 +824,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # (1.4 Nm) actuators. Policy stays 43-DOF and is directly deployable.
         "reg_hand_vel": RewardTermCfg(
             func=mdp.joint_vel_l2,
-            weight=-0.1,
+            weight=-0.01,
             params={"asset_cfg": SceneEntityCfg(
                 "robot", joint_names=(r".*_hand_(thumb|middle|index)_\d_joint",))},
         ),

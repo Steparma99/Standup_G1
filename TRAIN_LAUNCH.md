@@ -14,12 +14,24 @@ Base training (Use defaults: 4096 env, 12000 iter, wandb)
 
 bash launch.sh Unitree-G1-GetUp "insert run name"
 
-Costumize with 
+Customize with specific GPU, envs, iterations:
 
-bash launch.sh Unitree-G1-GetUp "insert run name"\
---agent.max-iterations=5000\
---env.scene.num-envs=1024\
---agent.logger=tensorboard
+bash launch.sh Unitree-G1-GetUp "insert run name" \
+  --gpu 1 \
+  --agent.max-iterations=2000 \
+  --env.scene.num-envs=4096
+
+  # --gpu N  → run on GPU N only (0, 1, 2 ...). Default from hardware_config.yaml.
+  # --env.scene.num-envs overrides the yaml default
+  # --agent.max-iterations overrides the default (12000)
+
+Other options:
+
+bash launch.sh Unitree-G1-GetUp "insert run name" \
+  --gpu 0 \
+  --agent.max-iterations=5000 \
+  --env.scene.num-envs=1024 \
+  --agent.logger=tensorboard
 
 Or:
 
@@ -73,14 +85,21 @@ python scripts/play.py Unitree-G1-GetUp \
 cd ~/Standup/Standup_G1/unitree_rl_mjlab && \
 MUJOCO_GL=egl conda run -n unitree_rl_cuda --no-capture-output \
 python scripts/play.py Unitree-G1-GetUp \
-  --checkpoint-file logs/rsl_rl/g1_getup/2026-06-23_16-55-45_phase2_no_jump_v/model_4498.pt \
+  --checkpoint-file logs/rsl_rl/g1_getup/2026-06-24_11-16-19_Phase_3_no_jump/model_5497.pt \
   --eval-beta 0.97 \
   --num-envs 16 --max-extra-envs 8 \
   --cam-distance 6 --cam-elevation -15 \
   --video=True --video-length 500 --video-width 1920 --video-height 1080
 
+MUJOCO_GL=egl conda run -n unitree_rl_cuda python scripts/play.py Unitree-G1-GetUp   --checkpoint-file logs/rsl_rl/g1_getup/2026-06-30_12-19-34/model_1999.pt   --num-envs 1   --video=True   --video-length 300
+
+
 
 **Visualize Rewards on the server**:
+
+conda run -n unitree_rl_cuda python scripts/print_rewards.py 2026-06-30_12-19-34
+
+
 
 cd ~/Standup/Standup_G1/unitree_rl_mjlab/logs/rsl_rl/g1_getup
 RUN="2026-06-24_09-34-38_Phase_3_no_jump/"

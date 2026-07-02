@@ -102,7 +102,7 @@ You can display the jit policy by adding `--use_jit` in the eval script.
 There are some useful notes:
 
 ## Simulation Frequency
-The simulation frequency has a huge impact on the performance of the policy. Most existing codebases for humanoid robots or quadruped robots use a sim frequency of 200Hz. This is enough for locomotion tasks like walking. For the getting up policy learning, we use a higher frequency of 1k Hz (`dt=0.001`). Although you can train a reasonable policy in simulation under 200Hz, but it will not work in the real world.
+The simulation frequency has a huge impact on the performance of the policy. Most existing codebases for humanoid robots or quadruped robots use a sim frequency of 200Hz. This is enough for locomotion tasks like walking. For the getting up policy learning, we useun a higher frequency of 1k Hz (`dt=0.001`). Although you can train a reasonable policy in simulation under 200Hz, but it will not work in the real world.
 
 ## Collision Mesh
 For the G1 humanoid robots, we have customized the original G1's collision mesh to simplified and modified collision mesh so that we can accelerate training and improve Sim2Real performance. 

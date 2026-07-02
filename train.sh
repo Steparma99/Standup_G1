@@ -19,12 +19,32 @@ MJLAB_DIR="$SCRIPT_DIR/unitree_rl_mjlab"
 EXTRA_ARGS=()
 
 if [ $# -lt 1 ]; then
-  echo "Usage: bash train.sh <task> [extra args]"
+  echo "Usage: bash train.sh <task> [--gpu N] [extra args]"
+  echo ""
+  echo "  --gpu N    Run on a specific GPU index (e.g. --gpu 1)"
   echo ""
   echo "Available tasks (run from mjlab dir):"
   python "$MJLAB_DIR/scripts/list_envs.py" 2>/dev/null || true
   exit 1
 fi
+
+# --- Pre-parse our own --gpu N flag (consumed here, not forwarded to Python) ---
+GPU_OVERRIDE=""
+FILTERED_ARGS=()
+i=1
+while [ $i -le $# ]; do
+  arg="${!i}"
+  if [[ "$arg" == "--gpu" ]]; then
+    i=$((i+1))
+    GPU_OVERRIDE="${!i}"
+  elif [[ "$arg" == --gpu=* ]]; then
+    GPU_OVERRIDE="${arg#--gpu=}"
+  else
+    FILTERED_ARGS+=("$arg")
+  fi
+  i=$((i+1))
+done
+set -- "${FILTERED_ARGS[@]}"
 
 if [ ! -f "$CONFIG_FILE" ]; then
   echo "[ERROR] hardware_config.yaml not found at: $CONFIG_FILE"
@@ -69,6 +89,10 @@ case "$BACKEND" in
     GPU_IDS=$(_yaml_get "cuda" "gpu_ids")
     # Convert YAML list [0, 1] → "0,1"
     GPU_IDS_CLEAN=$(echo "$GPU_IDS" | tr -d '[] ' | tr ',' ',')
+    # --gpu N override takes precedence over hardware_config.yaml
+    if [ -n "$GPU_OVERRIDE" ]; then
+      GPU_IDS_CLEAN="$GPU_OVERRIDE"
+    fi
     export CUDA_VISIBLE_DEVICES="$GPU_IDS_CLEAN"
     export MUJOCO_GL=$(_yaml_get "cuda" "mujoco_gl")
     NUM_ENVS=$(_yaml_get "cuda" "num_envs")
