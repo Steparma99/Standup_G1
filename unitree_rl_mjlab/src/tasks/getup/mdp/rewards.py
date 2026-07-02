@@ -1448,6 +1448,27 @@ _JOINT_VEL_LIMIT_CACHE = "_joint_vel_limit_cache"
 _ARM_VEL_SOFT_LIMIT_CACHE = "_arm_vel_soft_limit_cache"
 
 
+def action_acc_l2_deadzone(
+    env: ManagerBasedRlEnv,
+    deadzone: float = 1.0,
+) -> torch.Tensor:
+    """Jerk penalty with dead zone: Σ_j [|a_t - 2a_{t-1} + a_{t-2}| - deadzone]₊² [B,].
+
+    Only penalizes jerk that exceeds the dead zone. Small and moderate acceleration
+    during standup are free; only violent jerk is penalized.
+
+    With actions in [-1,1], max second difference = 4. At deadzone=1.0:
+      per-joint max = (4-1)² = 9  →  43 joints × 9 = 387  →  at weight -0.01 → max ≈ -3.87
+    """
+    action_acc = (
+        env.action_manager.action
+        - 2 * env.action_manager.prev_action
+        + env.action_manager.prev_prev_action
+    )  # [B, A]
+    excess = torch.clamp(action_acc.abs() - deadzone, min=0.0)
+    return torch.sum(excess.pow(2), dim=1)
+
+
 def arm_vel_soft_limit(
     env: ManagerBasedRlEnv,
     vel_limits: dict[str, float] | None = None,
@@ -1473,21 +1494,32 @@ def arm_vel_soft_limit(
 def joint_vel_limits(
     env: ManagerBasedRlEnv,
     vel_limits: dict[str, float] | None = None,
+    soft_ratio: float = 1.0,
+    normalize: bool = False,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """HoST joint velocity limits: Σ_i clamp(|q̇_i| - limit_i, 0) [B,].
+    """Joint velocity limit penalty, optionally normalized and threshold-gated [B,].
 
-    Hard, uncapped over-limit penalty (no soft ratio). Per-joint limits come from a
-    {joint_regex: limit} dict, resolved once and cached; unmatched joints get a huge
-    limit (never penalized). Returns a NON-NEGATIVE violation amount, so use a
-    negative weight (the HoST term is -Σ[...] with magnitude 1 -> weight -1.0).
+    Default (soft_ratio=1.0, normalize=False): original HoST behavior —
+      Σ clamp(|q̇| - limit, 0), unbounded, per-joint in rad/s.
+
+    With soft_ratio=0.85, normalize=True (recommended):
+      e_j = clamp((|q̇_j| - 0.85*lim_j) / (0.15*lim_j), 0, 1)
+      return Σ e_j  →  each joint contributes at most 1; total bounded by num_joints.
+      No penalty below 85% of limit; smooth ramp from 85% to 100%; hard cap at 1.
+      At weight -0.15: max penalty = -0.15 * num_joints ≈ -6.45 for 43 joints.
     """
     asset: Entity = env.scene[asset_cfg.name]
     cache = getattr(env, _JOINT_VEL_LIMIT_CACHE, None)
     if cache is None:
-        cache = torch.tensor(
+        raw = torch.tensor(
             [resolve_expr(vel_limits or {}, asset.joint_names, 1e6)], device=env.device
         )  # [1, J]
+        lo = raw * soft_ratio
+        span = (raw * (1.0 - soft_ratio)).clamp(min=1e-6)
+        cache = {"lo": lo, "span": span, "normalize": normalize}
         setattr(env, _JOINT_VEL_LIMIT_CACHE, cache)
-    over = torch.clamp(asset.data.joint_vel.abs() - cache, min=0.0)
+    over = torch.clamp(asset.data.joint_vel.abs() - cache["lo"], min=0.0)
+    if cache["normalize"]:
+        over = (over / cache["span"]).clamp(max=1.0)
     return torch.sum(over, dim=1)

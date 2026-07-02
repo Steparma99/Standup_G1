@@ -788,8 +788,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-2e-3),
-        # Smoothness = second action difference ||a_t - 2 a_{t-1} + a_{t-2}||².
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-2e-3),
+        # Smoothness: dead-zone jerk penalty — only |jerk| > 1.0 is penalized (squared).
+        # Dead zone allows normal standup acceleration; only violent oscillation is hit.
+        # Max per step: 43 joints × (4-1)² = 387 raw → weight -0.01 → max ≈ -3.87
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2_deadzone, weight=-0.01,
+                                        params={"deadzone": 1.0}),
         "joint_torques_l2": RewardTermCfg(
             func=mdp.joint_torques_l2, weight=0, #-2.5e-6,
             params={"asset_cfg": SceneEntityCfg("robot")},
@@ -800,7 +803,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         "joint_vel_l2": RewardTermCfg(
-            func=mdp.joint_vel_l2, weight=-1e-4,
+            func=mdp.joint_vel_l2, weight=0,  # disabled: penalizing all velocity fights standup
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         # Arm velocity soft threshold: penalizes only the excess above a comfortable
@@ -837,20 +840,23 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.joint_tracking_error, weight=0,
             params={"action_name": "joint_pos", "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Hard-wall joint position limit penalty (very high coefficient).
+        # Joint position limit penalty: linear in radian overshoot, weight -10 (was -100).
+        # Keeps gradient information (how far outside = how hard the push back).
+        # Max: ~2.05 rad total overshoot × -10 = -20.5. Hands already excluded.
         "joint_pos_limits": RewardTermCfg(
-            func=mdp.joint_pos_limits, weight=-1e2,
+            func=mdp.joint_pos_limits, weight=-10,
             # Finger joints (Dex3-1) have their XML range boundary at q=0; the 98%
             # soft-factor moves it inward leaving q=0 just outside, firing a constant
             # penalty regardless of pose. Exclude them: hand_contact_penalty + tiny
             # effort limits (1.4 Nm) already cover finger protection.
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=("^(?!.*_hand_).*$",))},
         ),
-        # Joint velocity limits: Σ clamp(|q̇| - limit, 0). weight -1.0 = HoST's
-        # "-Σ[...] with weight 1" (penalty: the function returns the violation amount).
+        # Joint velocity limits: normalized ramp from 85% to 100% of each joint's limit.
+        # Each joint contributes at most 1; total bounded by num_joints.
+        # Max: 43 joints × 1 × weight -0.15 = -6.45. No penalty below 85% of limit.
         "joint_vel_limits": RewardTermCfg(
             func=mdp.joint_vel_limits,
-            weight=-1.0,
+            weight=-0.15,
             params={
                 "vel_limits": {  # G1 actuator velocity limits [rad/s]
                     ".*_hip_pitch_joint": 32.0, ".*_hip_yaw_joint": 32.0, "waist_yaw_joint": 32.0,
@@ -860,6 +866,8 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "waist_roll_joint": 50.0, "waist_pitch_joint": 50.0,
                     ".*_shoulder_.*": 37.0, ".*_elbow_joint": 37.0, ".*_wrist_roll_joint": 37.0,
                 },
+                "soft_ratio": 0.85,
+                "normalize": True,
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         ),
