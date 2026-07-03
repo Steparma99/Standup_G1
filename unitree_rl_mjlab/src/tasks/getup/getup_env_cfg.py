@@ -798,7 +798,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Smoothness: dead-zone jerk penalty — only |jerk| > 1.0 is penalized (squared).
         # Dead zone allows normal standup acceleration; only violent oscillation is hit.
         # Max per step: 43 joints × (4-1)² = 387 raw → weight -0.01 → max ≈ -3.87
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2_deadzone, weight=-0.01,
+        # Phase 1: weight lowered -0.01 -> -0.003 (3x). At long episode lengths this grew
+        # to -2.56/ep and became a jerk-minimization objective competing with the explosive
+        # joint acceleration a floor push-up needs. Restore toward -0.01 in Phase 2 once
+        # the robot stands reliably.
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2_deadzone, weight=-0.003,
                                         params={"deadzone": 1.0}),
         "joint_torques_l2": RewardTermCfg(
             func=mdp.joint_torques_l2, weight=0, #-2.5e-6,
@@ -823,9 +827,15 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # motion needed to rise. Now 12/12/8 rad/s (normal swing free, only violent
         # thrash penalized) at weight -0.3. max_excess=15.0 caps a spike so a fall
         # transient cannot blow up the penalty.
+        # Phase 1: FULLY DISABLED (weight 0). At -0.3 this reached -3.88/ep — the single
+        # largest penalty — and fired hardest exactly when the robot needs a fast arm swing
+        # to push off the floor, creating a discount-asymmetry trap (immediate certain
+        # penalty vs delayed uncertain standing reward). The 500-iter run got stuck gently
+        # oscillating arms on the floor to stay under the threshold. Re-enable in Phase 2
+        # (arm velocity shaping) only AFTER the robot reliably stands.
         "reg_arm_vel": RewardTermCfg(
             func=mdp.arm_vel_soft_limit,
-            weight=-0.3,
+            weight=0,  # was -0.3 — disabled for Phase 1 standup learning
             params={
                 "vel_limits": {
                     ".*_shoulder_.*": 12.0,  # was 8.0 — allow normal standup swing
@@ -844,9 +854,13 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # ~n_finger_joints * 5 * 0.5 (no reward explosion on a sim glitch / fall).
         # Velocity-only (not position) so trapped fingers do not fight contact force
         # through the low-effort (1.4 Nm) actuators. Policy stays 43-DOF, deployable.
+        # Phase 1: DISABLED (weight 0). At -0.5 this reached -3.75/ep because the 3 rad/s
+        # deadband is too tight — any floor-pushing wrist/finger motion exceeds it, so it
+        # penalized the very hand use needed to get up. Hand velocity is not safety-critical
+        # during standup learning; re-enable in Phase 2 to stop finger thrash in standing.
         "reg_hand_vel": RewardTermCfg(
             func=mdp.hand_vel_soft_limit,
-            weight=-0.5,
+            weight=0,  # was -0.5 — disabled for Phase 1 standup learning
             params={
                 "vel_limits": {r".*_hand_(thumb|middle|index)_\d_joint": 3.0},  # rad/s deadband
                 "max_excess": 5.0,  # explosion guard: cap per-joint over-limit
