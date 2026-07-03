@@ -613,7 +613,14 @@ _GROUP_ONEHOT_ATTR = "_metric_group_onehot"
 
 
 def _grouped_step_reward(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    """[B, G] per-group summed reward rate; columns follow reward_groups.GROUP_ORDER."""
+    """[B, G] per-group summed reward rate; columns follow reward_groups.GROUP_ORDER.
+
+    Applies the same settling gate as the training signal (gate_settling_rewards): this
+    metric runs at env.step line ~389, BEFORE that step-event zeroes _step_reward, so we
+    reproduce the gate here to keep the logged reward_group/* panels consistent with what
+    the policy actually trains on. metrics runs BEFORE _reset_idx, so every env still holds
+    its true episode_length_buf and no reset-guard is needed (unlike the event).
+    """
     rm = env.reward_manager
     onehot = getattr(env, _GROUP_ONEHOT_ATTR, None)
     if onehot is None:
@@ -622,7 +629,14 @@ def _grouped_step_reward(env: "ManagerBasedRlEnv") -> torch.Tensor:
 
         onehot = build_group_onehot(list(rm.active_terms), device=env.device)
         setattr(env, _GROUP_ONEHOT_ATTR, onehot)
-    return rm._step_reward @ onehot  # [B, num_terms] @ [num_terms, G] -> [B, G]
+    grouped = rm._step_reward @ onehot  # [B, num_terms] @ [num_terms, G] -> [B, G]
+    # Deferred import (runtime) avoids the env_cfgs <-> mdp circular import at load time.
+    from src.tasks.getup.config.g1.env_cfgs import _SETTLE_STEPS
+
+    if _SETTLE_STEPS > 0:
+        gate = (env.episode_length_buf > _SETTLE_STEPS).float().unsqueeze(1)  # [B, 1]
+        grouped = grouped * gate
+    return grouped
 
 
 # Column order matches reward_groups.GROUP_ORDER = (task, style, regularization, post_task).

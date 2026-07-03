@@ -145,7 +145,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Settling phase (see the constants block above):
     #   1. policy held for _SETTLE_STEPS steps (action term, set below),
     #   2. residual velocity zeroed at the end of the window (this step-event),
-    #   3. impact penalties faded in over _MASK_STEPS (reward params, set below).
+    #   3. impact penalties faded in over _MASK_STEPS (reward params, set below),
+    #   4. ALL rewards zeroed for the whole window (gate_settling_rewards step-event):
+    #      the policy is passive during settling, so no reward it cannot influence
+    #      should enter the training signal or the logged episode returns.
     # ------------------------------------------------------------------
     if _SETTLE_STEPS > 0:
         cfg.events["settle_zero_velocity"] = EventTermCfg(
@@ -155,6 +158,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot"),
                 "settle_steps": _SETTLE_STEPS,
             },
+        )
+        cfg.events["gate_settling_rewards"] = EventTermCfg(
+            mode="step",
+            func=mdp.gate_settling_rewards,
+            params={"settle_steps": _SETTLE_STEPS},
         )
 
     # Foot contact sensor — same as velocity task, used for stand_on_feet reward.

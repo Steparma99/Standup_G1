@@ -174,10 +174,66 @@ def settle_zero_velocity(
     asset.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=ids)
 
 
+def gate_settling_rewards(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    settle_steps: int = 0,
+) -> None:
+    """Zero ALL reward signals for envs still inside the settling window.
+
+    Registered as a ``mode="step"`` event. During the first ``settle_steps`` env-steps
+    of each episode the policy does NOT control the robot: the action term PD-holds the
+    spawn pose while MuJoCo resolves the landing contacts (see
+    LowPassJointPositionAction.settle_steps / settle_zero_velocity). Any reward accrued
+    in that window is uncontrollable by the policy, so letting it enter the training
+    signal (or the logged returns) teaches the value function to expect "free" reward it
+    can never influence — corrupting the advantages of the steps the policy DOES control.
+
+    This is the single global gate (rather than per-term masking): it runs AFTER
+    ``RewardManager.compute()`` (env.step ~line 388) but BEFORE the RL runner reads the
+    reward tensors, so one zeroing propagates to every consumer at once:
+      * ``_step_reward``  — per-term rate consumed by MultiCriticPPO._grouped_rewards and
+                            the reward_group/* logging metrics,
+      * ``_reward_buf``   — the scalar reward returned to the runner (bookkeeping/logging),
+      * ``_episode_sums`` — the Episode_Reward/* per-term accumulators (contribution undone).
+
+    Boundary (see actions.py): the action term holds while ``episode_length_buf <
+    settle_steps`` at process-action time (episode_length_buf pre-increment), so the last
+    held step computes its reward at ``episode_length_buf == settle_steps``. At step-event
+    time episode_length_buf is post-increment, hence the settling window is exactly
+    ``episode_length_buf <= settle_steps``; rewards flow from ``settle_steps + 1`` on (the
+    first policy-controlled step).
+
+    ``reset_buf`` guard: ``_reset_idx`` runs BEFORE step events, so an env that terminated
+    THIS step already has ``episode_length_buf == 0`` here, yet its just-computed reward
+    belongs to the previous episode's final (controlled) step and must be kept. Excluding
+    ``reset_buf`` envs protects that terminating-step reward from being wrongly zeroed.
+    No-op when ``settle_steps <= 0``.
+    """
+    del env_ids  # step events act on all envs; we select by the per-env counter.
+    if settle_steps <= 0:
+        return
+    rm = env.reward_manager
+    settling = env.episode_length_buf <= settle_steps  # [B]
+    # Keep the terminating-step reward of any env that reset THIS step (buf just set to 0).
+    settling = settling & (~env.reset_buf.bool())
+    if not bool(settling.any()):
+        return
+    scale = env.step_dt if getattr(rm, "_scale_by_dt", True) else 1.0
+    # Undo this step's contribution to the per-term episode sums (they were accumulated
+    # inside RewardManager.compute using the dt-scaled value == _step_reward * scale).
+    for idx, name in enumerate(rm._term_names):
+        rm._episode_sums[name][settling] -= rm._step_reward[settling, idx] * scale
+    # Zero the training/logging reward tensors for the settling envs.
+    rm._step_reward[settling, :] = 0.0
+    rm._reward_buf[settling] = 0.0
+
+
 __all__ = [
     "reset_to_random_keyframe",
     "reset_episode_state",
     "settle_zero_velocity",
+    "gate_settling_rewards",
     "AssistanceCurriculum",
     "BetaRescalerCurriculum",
 ]

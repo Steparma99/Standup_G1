@@ -18,8 +18,11 @@ import torch
 GROUP_ORDER: tuple[str, ...] = ("task", "style", "regularization", "post_task")
 
 # Default per-group advantage weights (HoST: task 2.5 / style 1.9 / regu 0.1 / post 1.0).
+# Style raised 1.9 -> 2.2: posture shaping is important for a correct standup, and the
+# style terms are height-gated (only fire once the robot rises), so a higher critic
+# weight amplifies them where they matter without touching floor-phase task learning.
 # Overridable from the algorithm config (``reward_group_weights``).
-GROUP_WEIGHTS: tuple[float, ...] = (2.5, 1.9, 0.1, 1.0)
+GROUP_WEIGHTS: tuple[float, ...] = (2.5, 2.2, 0.1, 1.0)
 
 # Provisional assignment of every reward term to a group. Must cover ALL active reward
 # terms exactly once (enforced by build_group_onehot). Terminal penalties

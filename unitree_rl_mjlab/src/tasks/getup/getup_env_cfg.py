@@ -622,22 +622,24 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # on the floor (h < 0.40 m). All three are progress-based (reward the delta,
         # not the absolute pose), so parking in any static pose earns 0 — they cannot
         # be farmed. Weight=1.0 matches the existing task terms; output [0,1]/step.
+        # Weights raised 3x/2x (task must dominate regularization; see plan). This is
+        # the primary DIRECTION signal off the floor.
         "height_progress": RewardTermCfg(
             func=mdp.height_progress,
-            weight=1.0,
+            weight=3.0,  # was 1.0
             params={"max_step": 0.035,  # saturates at a slower rise rate -> less incentive to rocket up
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         "prone_recovery": RewardTermCfg(
             func=mdp.prone_recovery,
-            weight=1.0,
+            weight=2.0,  # was 1.0
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
         # supine_rising_prep needs foot site names (set per-robot in env_cfgs.py).
         # Output [0, 0.5]/step (gated to supine+low height only).
         "supine_rising_prep": RewardTermCfg(
             func=mdp.supine_rising_prep,
-            weight=1.0,
+            weight=2.0,  # was 1.0
             params={"asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
         # Head height: f_tol(h_head, [lower, inf), margin=1, value=0.1). h_head uses
@@ -645,7 +647,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # lower=0.794: torso_link at target standing (pelvis 0.75 + waist_roll offset 0.044).
         "task_head_height": RewardTermCfg(
             func=mdp.task_head_height,
-            weight=1.0,
+            weight=3.0,  # was 1.0 — primary HEIGHT signal, task must dominate reg
             params={
                 "lower": 0.794,
                 "margin": 1.0,
@@ -656,7 +658,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Base orientation: f_tol(-proj_grav_b[z], [0.99, inf), margin=1, value=0.05).
         "task_base_orientation": RewardTermCfg(
             func=mdp.task_base_orientation,
-            weight=1.0,
+            weight=3.0,  # was 1.0 — primary ORIENTATION signal, task must dominate reg
             params={"lower": 0.99, "margin": 1.0, "value_at_margin": 0.05,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
@@ -692,7 +694,7 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # rise, only straightens the torso as the robot approaches standing.
         "style_waist_upright": RewardTermCfg(
             func=mdp.joint_group_deviation,
-            weight=-8.0,
+            weight=-12.0,  # was -8.0 — stronger upright enforcement once standing
             params={"lower": -0.25, "upper": 0.25, "gate_lo": 0.65, "band": 0.08,
                     "require_upright": True,
                     "asset_cfg": SceneEntityCfg(
@@ -700,13 +702,13 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         "style_hip_deviation": RewardTermCfg(
             func=mdp.style_hip_deviation,
-            weight=1.0,
+            weight=2.0,  # was 1.0 — stronger hip alignment during standing
             params={"roll_limit": 1.4, "yaw_limit": 0.9, "penalty": -10.0,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         "style_knee_deviation": RewardTermCfg(
             func=mdp.style_knee_deviation,
-            weight=1.0,
+            weight=2.0,  # was 1.0 — stronger knee alignment during standing
             params={"hi_limit": 2.85, "lo_limit": -0.06, "penalty": -0.25,  # Ground value
                     "asset_cfg": SceneEntityCfg("robot", joint_names=(".*_knee_joint",))},
         ),
@@ -720,13 +722,13 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # clip_min=0.0: allows reward to reach exp(0)=1.0/foot when feet are centered under pelvis.
         "style_foot_displacement": RewardTermCfg(
             func=mdp.style_foot_displacement,
-            weight=2.5,
+            weight=4.0,  # was 2.5 — keep feet under pelvis (CoM support)
             params={"scale": 2.0, "clip_min": 0.0,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},  # Set per-robot.
         ),
         "style_foot_distance": RewardTermCfg(
             func=mdp.style_foot_distance,
-            weight=1.0,
+            weight=2.0,  # was 1.0 — stronger foot-separation control
             params={"max_dist_sq": 0.9, "penalty": -10.0,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},  # Set per-robot.
         ),
@@ -734,14 +736,14 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # default to G1 in rewards.py.
         "style_shank_orientation": RewardTermCfg(
             func=mdp.style_shank_orientation,
-            weight=5.0,
+            weight=8.0,  # was 5.0 — leg geometry signal during early rise (>H_STAGE1)
             params={"lower": 0.8, "margin": 1.0, "value_at_margin": 0.1,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Low trunk angular velocity during the rise (exp), weight 1; active > Stage 1.
         "style_base_ang_vel": RewardTermCfg(
             func=mdp.style_base_ang_vel,
-            weight=1.0,
+            weight=3.0,  # was 1.0 — penalize trunk spinning during rise (>H_STAGE1)
             params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Ankle parallel: binary +20 (highest style weight) when both feet are flat.
@@ -765,17 +767,22 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Hand contact: exponential penalty on contact force, active at ALL stages.
         # Dead zone <= free_force (hand weight ~7.65 N) → 0 penalty; grows as
         # exp(excess/force_scale)-1 above that. Capped internally at 5×force_scale
-        # to prevent overflow (raw max ≈ 147; weight -0.1 → max step penalty ≈ -14.7).
+        # to prevent overflow (raw max ≈ 147; weight -0.05 → max step penalty ≈ -7.35).
+        # Weight halved -0.1 → -0.05: at floor level these two terms were the ONLY
+        # active style signal (~-35/ep combined), monopolizing the style critic and
+        # telling the policy "never touch the floor with hands" during the very phase
+        # where a hand push-up may help. Halved so it still discourages hard hand
+        # contact without dominating the (otherwise height-gated) style group.
         # Tune force_scale vs. contact/hand_*_force_max metrics once training starts.
         "style_hand_left_contact": RewardTermCfg(
             func=mdp.hand_contact_penalty,
-            weight=-0.1,
+            weight=-0.05,  # was -0.1
             params={"sensor_name": "contact_hand_left",
                     "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS},
         ),
         "style_hand_right_contact": RewardTermCfg(
             func=mdp.hand_contact_penalty,
-            weight=-0.1,
+            weight=-0.05,  # was -0.1
             params={"sensor_name": "contact_hand_right",
                     "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS},
         ),
@@ -810,26 +817,41 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # swing speed (clamp(|q̇| - limit, 0)). Arms are free to move and assist
         # the get-up but are penalized when they exceed the per-joint speed cap.
         # Uses arm_vel_soft_limit (separate cache) to coexist with joint_vel_limits.
+        # Arm velocity soft threshold. Raised limits + lowered weight: the old
+        # (8/8/5 rad/s, weight -1.0) grew from -0.33 to -3.89 over training because
+        # normal standup arm swing exceeded 8 rad/s — the penalty fought the very arm
+        # motion needed to rise. Now 12/12/8 rad/s (normal swing free, only violent
+        # thrash penalized) at weight -0.3. max_excess=15.0 caps a spike so a fall
+        # transient cannot blow up the penalty.
         "reg_arm_vel": RewardTermCfg(
             func=mdp.arm_vel_soft_limit,
-            weight=-1.0,
+            weight=-0.3,
             params={
                 "vel_limits": {
-                    ".*_shoulder_.*": 8.0,  # [rad/s] ~460 deg/s — generous swing range
-                    ".*_elbow_joint":  8.0,
-                    ".*_wrist_.*":     5.0,  # wrists slower: less leverage needed
+                    ".*_shoulder_.*": 12.0,  # was 8.0 — allow normal standup swing
+                    ".*_elbow_joint":  12.0,  # was 8.0
+                    ".*_wrist_.*":     8.0,   # was 5.0
                 },
+                "max_excess": 15.0,  # explosion guard: cap per-joint over-limit
             },
         ),
-        # Hand velocity penalty: keeps fingers still during the get-up phase.
-        # Velocity-only (not position) so trapped fingers under the torso do not
-        # create a position error that fights contact force through the low-effort
-        # (1.4 Nm) actuators. Policy stays 43-DOF and is directly deployable.
+        # Hand velocity penalty: keeps fingers from being ACTIVELY spun during get-up.
+        # Was joint_vel_l2 (Σ q̇², no threshold) which penalized the unavoidable passive
+        # finger drag on the floor (~1 rad/s) → a constant ~-10/ep noise floor the policy
+        # could not reduce. Now a DEADBAND (clamp(|q̇| - 3.0, 0)): 0 while fingers move at
+        # normal passive speed, linear only when spun past 3 rad/s. max_excess=5.0 caps a
+        # spike at 5 rad/s over-limit → per-step penalty bounded to
+        # ~n_finger_joints * 5 * 0.5 (no reward explosion on a sim glitch / fall).
+        # Velocity-only (not position) so trapped fingers do not fight contact force
+        # through the low-effort (1.4 Nm) actuators. Policy stays 43-DOF, deployable.
         "reg_hand_vel": RewardTermCfg(
-            func=mdp.joint_vel_l2,
-            weight=-0.01,
-            params={"asset_cfg": SceneEntityCfg(
-                "robot", joint_names=(r".*_hand_(thumb|middle|index)_\d_joint",))},
+            func=mdp.hand_vel_soft_limit,
+            weight=-0.5,
+            params={
+                "vel_limits": {r".*_hand_(thumb|middle|index)_\d_joint": 3.0},  # rad/s deadband
+                "max_excess": 5.0,  # explosion guard: cap per-joint over-limit
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
         ),
         # Strongest in the group: PD target-vs-measured gap (implicit effort penalty).
         # HoST uses -2.5e-4 here; the previous -2.5e-1 was 1000x harsher, which
@@ -915,8 +937,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         # Both-feet grounded reward: 0.5 for one foot, 1.0 for both. Directly penalizes
         # the one-foot balancing behaviour. site_names set per-robot in env_cfgs.py.
+        # Gate triggers earlier (h=0.50m) than the other post-task terms (0.65m), so
+        # this is the bridge signal during the rise. Weight raised 5→8 to make planting
+        # both feet more valuable through the mid-rise phase.
         "post_stand_on_feet": RewardTermCfg(
-            func=mdp.stand_on_feet, weight=5.0,
+            func=mdp.stand_on_feet, weight=8.0,  # was 5.0
             params={"sensor_name": "feet_ground_contact",
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),

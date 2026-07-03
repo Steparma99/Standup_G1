@@ -38,9 +38,12 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             obs_normalization=True,
         ),
         # Multi-critic PPO: per-group advantages combined with reward_group_weights
-        # (Task 2.5 / Style 1.9 / Regularization 0.1 / Post-task 1.0).
+        # (Task 2.5 / Style 2.2 / Regularization 0.1 / Post-task 1.0). Style raised
+        # 1.9 -> 2.2: posture shaping matters for a correct standup and the style terms
+        # are height-gated (fire only once the robot rises), so a higher critic weight
+        # amplifies them where they matter without disturbing floor-phase task learning.
         algorithm=MultiCriticPpoAlgorithmCfg(
-            reward_group_weights=(2.5, 1.9, 0.1, 1.0),
+            reward_group_weights=(2.5, 2.2, 0.1, 1.0),
             # L2C2 smoothness: Lipschitz-continuity penalty on the actor and each critic,
             # added to the loss every update (lambda_actor=1.0, lambda_critic=0.1 per critic).
             l2c2_actor_coef=1.0,
