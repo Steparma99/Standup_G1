@@ -14,7 +14,9 @@ from src.assets.robots import get_g1_supine_robot_cfg_host
 from src.assets.robots.unitree_g1.g1_constants import (
     HOME_KEYFRAME,
     PRONE_KEYFRAME,
-    SEATED_KEYFRAME,
+    # SEATED_KEYFRAME,  # temporarily disabled — not a static equilibrium without
+    #                     back support (topples during settling); re-enable in the
+    #                     reset keyframes below when the scene adds seated support.
     SIDE_LEFT_KEYFRAME,
     SIDE_RIGHT_KEYFRAME,
     SUPINE_KEYFRAME,
@@ -31,10 +33,11 @@ _DR_ACTION_DELAY_ENABLE   = False    # P1.6: action lag buffer per env
 
 # ---------------------------------------------------------------------------
 # Pose perturbation. When False the robot spawns at the EXACT canonical
-# keyframe pose (no joint noise, no root roll/pitch noise). All 5 canonical
-# poses (SUPINE, PRONE, SIDE_LEFT, SIDE_RIGHT, SEATED) are always used for
-# episode diversity; this flag only controls whether random noise is added
-# around each pose. Set to True once the policy reliably stands from all poses.
+# keyframe pose (no joint noise, no root roll/pitch noise). The 4 ground-lying
+# poses (SUPINE, PRONE, SIDE_LEFT, SIDE_RIGHT) are used for episode diversity
+# (SEATED temporarily removed — see the reset keyframes below); this flag only
+# controls whether random noise is added around each pose. Set to True once the
+# policy reliably stands from all poses.
 # ---------------------------------------------------------------------------
 _ADD_POSE_PERTURBATION = False
 
@@ -122,16 +125,21 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # variant (hip Kp=200, knee Kp=275; all other gains/damping unchanged).
     cfg.scene.entities = {"robot": get_g1_supine_robot_cfg_host()}
 
-    # All 5 canonical poses for episode diversity (SUPINE, PRONE, SIDE_LEFT,
-    # SIDE_RIGHT, SEATED). SEATED is the closest to standing and gives the
-    # curriculum its earliest success signals; PRONE is important for real-world
-    # forward falls. Perturbation noise is disabled until _ADD_POSE_PERTURBATION=True.
+    # Ground-lying poses for episode diversity (SUPINE, PRONE, SIDE_LEFT,
+    # SIDE_RIGHT). PRONE is important for real-world forward falls.
+    # SEATED is TEMPORARILY REMOVED: without back support it is not a static
+    # equilibrium — a settle probe showed it topples backward through the 30-step
+    # settling window (projected-gravity z drifts from -0.97 toward ~0, i.e. it
+    # ends up ~supine and still moving), so the policy inherited real angular
+    # momentum on handover and "huge initial movement". It will be re-added once
+    # the scene supports back support / props / varied terrain to make a seated
+    # start statically stable.  Perturbation noise stays off until
+    # _ADD_POSE_PERTURBATION=True.
     cfg.events["reset_pose"].params["keyframes"] = (
         SUPINE_KEYFRAME,
         PRONE_KEYFRAME,
         SIDE_LEFT_KEYFRAME,
         SIDE_RIGHT_KEYFRAME,
-        SEATED_KEYFRAME,
     )
     if not _ADD_POSE_PERTURBATION:
         cfg.events["reset_pose"].params["joint_pos_range"] = {}
@@ -426,6 +434,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "decrement": _BETA_DECREMENT,
                 "beta_min": _BETA_MIN,
                 "success_head_height": _BETA_SUCCESS_HEAD_HEIGHT,
+                # Feet-planted qualifier: beta only decays on a GENUINE stand
+                # (head height reached WHILE both feet planted), not a torso-lean
+                # spike — same qualifier as the assistance curriculum above.
+                "feet_sensor_name": "feet_ground_contact",
+                "foot_site_names": site_names,  # ("left_foot", "right_foot")
+                "foot_height_threshold": 0.1,
             },
         )
         cfg.metrics["curriculum/beta_rescaler"] = MetricsTermCfg(

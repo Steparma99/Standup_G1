@@ -240,6 +240,56 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
+# Feet-planted qualifier — shared by the assistance-force and beta curricula
+#
+# Both curricula must only award "success" (and therefore withdraw their help)
+# when the robot genuinely stood on its legs, NOT when a torso-lean / arch-back
+# transiently spiked the pelvis/head height without the feet bearing weight.
+# These two helpers resolve the feet contact sensor + foot sites (once, in
+# __init__) and compute the per-step "both feet planted" mask (mirror of
+# mdp.rewards.stand_on_feet's contact+height logic), so the two curricula share
+# identical qualifier logic and cannot drift apart.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_feet_planted_cfg(asset: "Entity", params: dict, device):
+    """Resolve (feet_sensor_name, foot_site_ids, foot_height_threshold) from cfg.
+
+    ``foot_site_names`` are resolved to ids IN ORDER so ``site_pos_w[:, ids, 2]``
+    lines up with the sensor's per-foot ``found`` columns.
+    """
+    feet_sensor_name = str(params["feet_sensor_name"])
+    foot_site_names = tuple(params["foot_site_names"])
+    site_ids, _ = asset.find_sites(foot_site_names, preserve_order=True)
+    foot_site_ids = torch.as_tensor(site_ids, device=device, dtype=torch.long)
+    foot_height_threshold = float(params.get("foot_height_threshold", 0.1))
+    return feet_sensor_name, foot_site_ids, foot_height_threshold
+
+
+def _both_feet_planted(
+    env: "ManagerBasedRlEnv",
+    asset: "Entity",
+    feet_sensor_name: str,
+    foot_site_ids: torch.Tensor,
+    foot_height_threshold: float,
+    num_envs: int,
+    device,
+) -> torch.Tensor:
+    """[B] bool: both feet in ground contact AND not elevated (foot z < threshold).
+
+    Returns all-False before the contact sensor is populated (found is None).
+    """
+    contact_sensor = env.scene[feet_sensor_name]
+    found = contact_sensor.data.found
+    if found is None:
+        return torch.zeros(num_envs, dtype=torch.bool, device=device)
+    in_contact = found > 0  # [B, N_feet]
+    foot_heights = asset.data.site_pos_w[:, foot_site_ids, 2]  # [B, N_feet]
+    foot_low = foot_heights < foot_height_threshold
+    return (in_contact & foot_low).all(dim=1)  # [B]
+
+
+# ---------------------------------------------------------------------------
 # Assistance curriculum (HoST-style decaying support force)
 # ---------------------------------------------------------------------------
 
@@ -300,14 +350,12 @@ class AssistanceCurriculum:
         # arch-back that transiently spikes pelvis height WITHOUT the legs bearing
         # weight retires the assist force — the failure mode that let the old
         # policy anneal the 120 N lift away while never learning to stand on its
-        # legs. Mirrors mdp.rewards.stand_on_feet's contact+height logic.
-        self._feet_sensor_name = str(p["feet_sensor_name"])
-        foot_site_names = tuple(p["foot_site_names"])
-        site_ids, _ = self._asset.find_sites(foot_site_names, preserve_order=True)
-        self._foot_site_ids = torch.as_tensor(
-            site_ids, device=self._device, dtype=torch.long
-        )
-        self._foot_height_threshold = float(p.get("foot_height_threshold", 0.1))
+        # legs. See _both_feet_planted (shared with BetaRescalerCurriculum).
+        (
+            self._feet_sensor_name,
+            self._foot_site_ids,
+            self._foot_height_threshold,
+        ) = _resolve_feet_planted_cfg(self._asset, p, self._device)
 
         # Per-env state.
         self._force = torch.full(
@@ -326,19 +374,10 @@ class AssistanceCurriculum:
         # reset): height only counts while both feet are planted, so a torso-lean
         # that lifts the pelvis without loading the legs earns no decay credit.
         h = self._asset.data.root_link_pos_w[:, 2]
-        contact_sensor = env.scene[self._feet_sensor_name]
-        found = contact_sensor.data.found
-        if found is None:
-            both_planted = torch.zeros(
-                self._num_envs, dtype=torch.bool, device=self._device
-            )
-        else:
-            in_contact = found > 0  # [B, N_feet]
-            foot_heights = self._asset.data.site_pos_w[
-                :, self._foot_site_ids, 2
-            ]  # [B, N_feet]
-            foot_low = foot_heights < self._foot_height_threshold
-            both_planted = (in_contact & foot_low).all(dim=1)  # [B]
+        both_planted = _both_feet_planted(
+            env, self._asset, self._feet_sensor_name, self._foot_site_ids,
+            self._foot_height_threshold, self._num_envs, self._device,
+        )
         h_qualified = torch.where(both_planted, h, torch.zeros_like(h))
         torch.maximum(self._peak_height, h_qualified, out=self._peak_height)
 
@@ -390,20 +429,29 @@ class BetaRescalerCurriculum:
     The PD target is  p^d = q_default + beta * a  (the action term reads this
     per-env beta). beta starts at `initial_beta` = 1.0, giving the policy large
     action authority while it is still flailing on the floor, and is decremented
-    by `decrement` (0.02) every time an env's episode ends having reached the
-    standing head height (`success_head_height`), down to a floor of `beta_min`
-    (0.25 — exactly the fixed value HoST's no-curriculum ablation uses). The
-    policy OBSERVES its env's beta, so it adapts as its action scale shrinks.
+    by `decrement` (0.02) every time an env's episode ends having achieved a
+    GENUINE stand — the standing head height (`success_head_height`) reached
+    WHILE both feet are planted — down to a floor of `beta_min` (0.25 — exactly
+    the fixed value HoST's no-curriculum ablation uses). The policy OBSERVES its
+    env's beta, so it adapts as its action scale shrinks.
+
+    Feet-planted qualifier (matches AssistanceCurriculum): the success flag only
+    latches when the head-height threshold is met AT THE SAME STEP as both feet
+    being planted. Without it, a torso-lean / arch-back that transiently lifts the
+    head past the threshold — without the legs bearing weight — would permanently
+    shrink the policy's action authority before it has actually learned to stand.
+    This is what let the previous run's beta collapse (1.0 -> 0.76) while
+    success/stable_hold stayed ~0: authority was withdrawn on false positives.
 
     This is the SAME per-env success-driven mechanism as AssistanceCurriculum
     (the vertical support force): the help/authority fades per env, exactly as
     fast as that env learns to stand. It is NOT a global iteration ramp, so it is
     invariant to the number of parallel envs and the episode length.
 
-    Registered with ``mode="step"``: ``__call__`` runs every control step (track
-    whether this episode has reached the success head height) and ``reset`` is
-    called for envs starting a new episode (decrement beta for the ones that
-    succeeded, clear the per-episode success flag).
+    Registered with ``mode="step"``: ``__call__`` runs every control step (latch
+    whether this episode has genuinely stood) and ``reset`` is called for envs
+    starting a new episode (decrement beta for the ones that succeeded, clear the
+    per-episode success flag).
     """
 
     def __init__(self, cfg, env: "ManagerBasedRlEnv"):
@@ -424,11 +472,20 @@ class BetaRescalerCurriculum:
         self._beta_min = float(p["beta_min"])
         self._success_head_height = float(p["success_head_height"])
 
+        # Feet-planted qualifier (see _both_feet_planted, shared with
+        # AssistanceCurriculum): beta only decays on a GENUINE stand, not a
+        # torso-lean head-height spike.
+        (
+            self._feet_sensor_name,
+            self._foot_site_ids,
+            self._foot_height_threshold,
+        ) = _resolve_feet_planted_cfg(self._asset, p, self._device)
+
         # Per-env state.
         self._beta = torch.full(
             (self._num_envs,), self._initial_beta, device=self._device
         )
-        # Did this episode reach the success head height at any step?
+        # Did this episode reach the success head height WHILE both feet planted?
         self._reached_success = torch.zeros(
             self._num_envs, device=self._device, dtype=torch.bool
         )
@@ -438,9 +495,14 @@ class BetaRescalerCurriculum:
 
     def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
         del env_ids, kwargs  # step events always act on all envs
-        # Head-height proxy = tracked body (torso_link) world-frame z.
+        # Genuine stand = head-height proxy (torso_link z) at/above threshold AT
+        # THE SAME STEP as both feet planted. Latches for the rest of the episode.
         h_head = self._asset.data.body_link_pos_w[:, self._body_id, 2]
-        self._reached_success |= h_head >= self._success_head_height
+        both_planted = _both_feet_planted(
+            env, self._asset, self._feet_sensor_name, self._foot_site_ids,
+            self._foot_height_threshold, self._num_envs, self._device,
+        )
+        self._reached_success |= (h_head >= self._success_head_height) & both_planted
 
     def reset(self, env_ids=None) -> None:
         if env_ids is None:
