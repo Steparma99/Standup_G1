@@ -736,8 +736,13 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # default to G1 in rewards.py.
         "style_shank_orientation": RewardTermCfg(
             func=mdp.style_shank_orientation,
-            weight=8.0,  # was 5.0 — leg geometry signal during early rise (>H_STAGE1)
+            weight=8.0,  # was 5.0 — leg geometry signal, now active from the ground up
+            # height_threshold=0.0: shank-verticality reward is live for essentially
+            # the whole episode (gate ~50% at h=0, full by h=0.08 m) instead of only
+            # above ~0.41 m, closing the leg-geometry dead zone that let a torso-lean
+            # strategy earn full task reward without ever loading the legs.
             params={"lower": 0.8, "margin": 1.0, "value_at_margin": 0.1,
+                    "height_threshold": 0.0,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Low trunk angular velocity during the rise (exp), weight 1; active > Stage 1.

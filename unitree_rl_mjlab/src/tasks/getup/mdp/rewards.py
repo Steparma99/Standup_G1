@@ -1163,12 +1163,17 @@ def style_shank_orientation(
     lower: float = 0.8,
     margin: float = 1.0,
     value_at_margin: float = 0.1,
+    height_threshold: float = H_STAGE1,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """HoST shank orientation: f_tol(mean(shank_z), [0.8, inf), m=1, v=0.1) · 1(h>H_STAGE1) [B,].
+    """HoST shank orientation: f_tol(mean(shank_z), [0.8, inf), m=1, v=0.1) · gate(h) [B,].
 
     shank_z = (z_knee - z_foot)/||knee - foot|| per leg (1 = vertical shank), averaged
-    over both legs. Encourages upright lower legs during the rise. Active after Stage 1.
+    over both legs. Encourages upright lower legs during the rise. `height_threshold`
+    sets where the _standing_gate ramp centers: with the default H_STAGE1=0.45 the
+    reward only turns on mid-rise; set it to 0.0 to make the shank signal active from
+    the ground up (band ±0.08 m -> ~50% at h=0, fully on by h=0.08 m), giving the legs
+    an early reason to tuck vertically rather than the robot leaning its torso up.
     """
     asset: Entity = env.scene[asset_cfg.name]
     knee_ids = _cached_body_ids(env, asset, knee_names, "_shank_tol_knee_ids")
@@ -1180,7 +1185,7 @@ def style_shank_orientation(
     cos = vec[..., 2] / (torch.norm(vec, dim=-1) + 1e-6)  # [B, 2]
     mean_cos = cos.mean(dim=1)  # [B]
     r = f_tol(mean_cos, lower, float("inf"), margin, value_at_margin)
-    gate = _standing_gate(asset.data.root_link_pos_w[:, 2], H_STAGE1, band=0.08)
+    gate = _standing_gate(asset.data.root_link_pos_w[:, 2], height_threshold, band=0.08)
     return r * gate
 
 

@@ -294,6 +294,21 @@ class AssistanceCurriculum:
         # reached, so partial progress still fades the support (see reset()).
         self._progress_floor = float(p.get("progress_floor", 0.20))
 
+        # Feet-planted qualifier for the decay credit. Only pelvis height reached
+        # while BOTH feet are genuinely planted (in ground contact AND not
+        # elevated) counts toward peak height. Without this, a torso-lean /
+        # arch-back that transiently spikes pelvis height WITHOUT the legs bearing
+        # weight retires the assist force — the failure mode that let the old
+        # policy anneal the 120 N lift away while never learning to stand on its
+        # legs. Mirrors mdp.rewards.stand_on_feet's contact+height logic.
+        self._feet_sensor_name = str(p["feet_sensor_name"])
+        foot_site_names = tuple(p["foot_site_names"])
+        site_ids, _ = self._asset.find_sites(foot_site_names, preserve_order=True)
+        self._foot_site_ids = torch.as_tensor(
+            site_ids, device=self._device, dtype=torch.long
+        )
+        self._foot_height_threshold = float(p.get("foot_height_threshold", 0.1))
+
         # Per-env state.
         self._force = torch.full(
             (self._num_envs,), self._initial_force, device=self._device
@@ -307,9 +322,25 @@ class AssistanceCurriculum:
 
     def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
         del env_ids, kwargs  # step events always act on all envs
-        # Track the episode's peak pelvis height (drives the decay at reset).
+        # Track the episode's peak QUALIFIED pelvis height (drives the decay at
+        # reset): height only counts while both feet are planted, so a torso-lean
+        # that lifts the pelvis without loading the legs earns no decay credit.
         h = self._asset.data.root_link_pos_w[:, 2]
-        torch.maximum(self._peak_height, h, out=self._peak_height)
+        contact_sensor = env.scene[self._feet_sensor_name]
+        found = contact_sensor.data.found
+        if found is None:
+            both_planted = torch.zeros(
+                self._num_envs, dtype=torch.bool, device=self._device
+            )
+        else:
+            in_contact = found > 0  # [B, N_feet]
+            foot_heights = self._asset.data.site_pos_w[
+                :, self._foot_site_ids, 2
+            ]  # [B, N_feet]
+            foot_low = foot_heights < self._foot_height_threshold
+            both_planted = (in_contact & foot_low).all(dim=1)  # [B]
+        h_qualified = torch.where(both_planted, h, torch.zeros_like(h))
+        torch.maximum(self._peak_height, h_qualified, out=self._peak_height)
 
         # Upward world-frame force; suppressed during the initial settle phase.
         active = env.episode_length_buf >= self._unactuated_steps
@@ -323,10 +354,12 @@ class AssistanceCurriculum:
         if env_ids is None:
             env_ids = torch.arange(self._num_envs, device=self._device)
         # Partial-credit annealing: decay in proportion to how close the episode got
-        # to standing (peak height vs success_height, floored at progress_floor =
-        # stage-1 entry). Full success (peak >= success_height) -> full decay, exactly
-        # as before; partial progress still anneals the assist, so the support fades
-        # as competence grows and the FINAL policy trains (near-)unassisted — closing
+        # to standing (peak FEET-PLANTED height vs success_height, floored at
+        # progress_floor). peak_height now only accumulates while both feet are
+        # planted (see __call__), so the credit reflects genuine leg-driven rising,
+        # not a torso-lean spike. Full success (peak >= success_height) -> full
+        # decay; partial progress still anneals the assist, so the support fades as
+        # competence grows and the FINAL policy trains (near-)unassisted — closing
         # the train/eval gap that left the old policy dependent on the 120 N lift.
         span = max(self._success_height - self._progress_floor, 1e-6)
         progress = torch.clamp(

@@ -397,6 +397,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "success_height": _ASSIST_SUCCESS_HEIGHT,
                 "progress_floor": _ASSIST_PROGRESS_FLOOR,
                 "unactuated_steps": _ASSIST_UNACTUATED_STEPS,
+                # Feet-planted qualifier: assist-decay credit only accrues while
+                # both feet are genuinely planted, not on torso-lean height spikes.
+                "feet_sensor_name": "feet_ground_contact",
+                "foot_site_names": site_names,  # ("left_foot", "right_foot")
+                "foot_height_threshold": 0.1,
             },
         )
         cfg.metrics["curriculum/assistance_force"] = MetricsTermCfg(
