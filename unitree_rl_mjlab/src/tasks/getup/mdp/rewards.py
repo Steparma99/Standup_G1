@@ -1135,7 +1135,10 @@ def style_foot_displacement(
     d2 = ((foot_xy - base_xy).pow(2)).sum(dim=-1)  # [B, F]
     d2 = torch.clamp(d2, min=clip_min)
     r = torch.exp(-scale * d2).sum(dim=1)  # [B]
-    gate = (asset.data.root_link_pos_w[:, 2] > H_STAGE2).float()
+    # Ramped gate (was a hard step at H_STAGE2): this term was part of the F1
+    # reward cliff — several standing rewards all switching on discontinuously at
+    # 0.65 m. Same band as _post_gate so all standing payoffs fade in together.
+    gate = _standing_gate(asset.data.root_link_pos_w[:, 2], H_STAGE2, band=0.08)
     return r * gate
 
 
@@ -1273,14 +1276,25 @@ _POST_UPPER_CACHE_ATTR = "_post_upper_body_cache"
 _HOME_L2_CACHE_ATTR = "_home_l2_cache"
 
 
-def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.02) -> torch.Tensor:
+def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.08) -> torch.Tensor:
     """Height × upright gate for post-task and style-standing rewards [B,].
 
     Height factor: linear ramp 0→1 over [threshold-band, threshold+band].
     Upright factor: clamp(-proj_grav_z, 0, 1) — 0 when lying, 1 when fully upright.
-    With default band=0.02 and H_STAGE2=0.65: ramp spans [0.63m, 0.67m]; gate reaches
-    100% at 0.67m — just 2cm above the standing threshold, eliminating the gradient
-    that previously pulled the robot to jump toward 0.71m (old band=0.06).
+
+    band history (genuine tradeoff — both extremes failed in training):
+      - band=0.06 -> ramp [0.59, 0.71]: robot learned to BALLISTICALLY JUMP toward
+        ~0.71 m to grab the payoff, then fell (commit 71e6646 shrank it).
+      - band=0.02 -> ramp [0.63, 0.67]: near-zero gradient below standing. Run
+        2026-07-07_14-50-55 converged to a stable feet-planted CROUCH at ~0.5-0.6 m
+        (farming post_stand_on_feet, own gate 0.50) and stopped climbing: as the
+        assist force decayed 69->44 N, ever_stood crashed 0.12->0.03 while
+        mean_reward kept RISING — a sub-standing local optimum.
+      - band=0.08 (current) -> ramp [0.57, 0.73]: post-task standing rewards fade in
+        from the top of that crouch upward, restoring a climbing gradient out of the
+        local optimum. The co-gated post_base_lin_vel penalty (weight 15) covers the
+        same ramp, damping the old ballistic-jump incentive. If jumping returns
+        (task_head_impact spikes, violent rises in video), dial back toward ~0.05.
     """
     h = asset.data.root_link_pos_w[:, 2]
     upright = torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)

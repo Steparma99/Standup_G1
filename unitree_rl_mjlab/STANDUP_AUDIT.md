@@ -56,7 +56,27 @@ The four highest-leverage findings, ranked:
 
 ## Findings, ranked by severity
 
-### F1 [HIGH] — `post_task`'s reward gate is a cliff, not a ramp
+### F1 [HIGH] — `post_task`'s reward gate is a cliff, not a ramp — ✅ FIXED 2026-07-07
+
+**Update (2026-07-07, after run `2026-07-07_14-50-55` completed its 2000 iters):**
+The cliff was confirmed as the binding constraint by live training data. With F2
+fixed (β preserved at 0.99), the run converged to a **stable feet-planted crouch
+at ~0.5-0.6 m**: as `assistance_force` decayed 69→44 N, `ever_stood` crashed
+0.125→0.027 and `stage3`→0.001, while `post_stand_on_feet` (gate 0.50) ROSE to
+0.72 and `mean_reward` stayed flat/up — the policy scored higher by crouching
+than by risking the unrewarded climb through the 4 cm cliff. **Fix applied:**
+`_post_gate` band 0.02 → 0.08 (ramp now [0.57, 0.73] — gradient starts at the
+top of the crouch), and `style_foot_displacement`'s hard step-gate at 0.65 m
+replaced with the same 0.08-band ramp (it was the residual +7.8 discontinuity).
+Probe re-run confirms: the former +60-in-6cm jump is now +24/+28/+18 across
+18 cm, endpoints unchanged (standing +94.7, lying ~+3). Band history is a real
+tradeoff — 0.06 caused ballistic jumping (commit 71e6646), 0.02 caused the
+crouch; 0.08 leans toward "climb" with the co-gated `post_base_lin_vel`
+(weight 15) now covering the climb zone to damp jumping. **Watch item:** if the
+next run shows the old jump behavior (violent rises, `task_head_impact`
+spikes), dial band back toward ~0.05. Original analysis below.
+
+---
 
 **Where:** `_post_gate(asset, H_STAGE2=0.65, band=0.02)` in
 `src/tasks/getup/mdp/rewards.py:1271-1282`, applied to 10 `post_task` reward
