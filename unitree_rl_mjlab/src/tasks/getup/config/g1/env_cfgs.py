@@ -139,11 +139,15 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # the scene supports back support / props / varied terrain to make a seated
     # start statically stable.  Perturbation noise stays off until
     # _ADD_POSE_PERTURBATION=True.
+    # SUPINE-ONLY baseline: collapse the reset to a single fixed start pose so the
+    # policy learns a near-deterministic supine standup first (the robot spawns at
+    # the exact same pose + yaw every episode). PRONE / SIDE_LEFT / SIDE_RIGHT are
+    # temporarily removed — with stable_hold stuck at 0 across 1.3k iters, asking one
+    # policy to solve four different getups (prone and side are much harder than
+    # supine) was spreading the gradient too thin. Re-add poses ONE AT A TIME only
+    # after the robot reliably stands and holds from supine.
     cfg.events["reset_pose"].params["keyframes"] = (
         SUPINE_KEYFRAME,
-        PRONE_KEYFRAME,
-        SIDE_LEFT_KEYFRAME,
-        SIDE_RIGHT_KEYFRAME,
     )
     if not _ADD_POSE_PERTURBATION:
         cfg.events["reset_pose"].params["joint_pos_range"] = {}
