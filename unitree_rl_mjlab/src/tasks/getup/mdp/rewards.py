@@ -184,6 +184,56 @@ def stand_on_feet(
     return (0.5 * any_foot + 0.5 * both_feet) * gate
 
 
+def pelvis_height_bridge(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    lower: float = 0.35,
+    upper: float = 0.75,
+    foot_height_threshold: float = 0.1,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense feet-planted pelvis-height ramp that BRIDGES the crouch->stand gap [B,].
+
+    Motivation. The get-up reward stack had a WALL at pelvis h≈0.65: `height_progress`
+    is an upward-*delta* reward (zero the instant the robot stops rising), and every
+    "standing" reward (post_base_*, stable_success_hold) is gated at h>0.65 — so a
+    robot that reaches an upright-torso CROUCH (~0.4-0.6 m) sits in a dead zone with no
+    gradient pulling the pelvis the last stretch up. Training parked there (stage2≈60%,
+    stage3≈0.3%). This term fills that gap with a CONTINUOUS position reward.
+
+        reward = height_ramp · upright · feet_planted   ∈ [0, 1]
+
+      - height_ramp = clamp((h - lower)/(upper - lower), 0, 1): 0 at `lower` (deep
+        crouch), 1 at `upper` (standing). A monotone climbing gradient across the whole
+        band — unlike the delta reward it keeps paying more for every extra cm, so
+        extending the legs out of the crouch is always uphill.
+      - upright = clamp(-proj_grav_b_z, 0, 1): 1 when the pelvis is vertical, 0 when
+        horizontal. Kills the glute-BRIDGE exploit (hips up, back on floor → pelvis
+        horizontal → 0) so a high pelvis only pays when the trunk is actually upright.
+      - feet_planted = mean over feet of (in_contact AND low): 0/0.5/1. Kills the
+        BALLISTIC-JUMP exploit — you cannot farm height by launching, because a jump
+        lifts the feet off the floor and zeroes the term. Same planted-foot convention
+        as `stand_on_feet`.
+
+    The ONLY way to maximise all three factors at once is to stand tall with both feet
+    planted and the trunk upright — i.e. the actual task — so this is a dense signal
+    that is not farmable by any of the sub-standing local optima we have seen. Requires
+    `asset_cfg.site_names` = the two foot sites (set per-robot). Use a POSITIVE weight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    h = asset.data.root_link_pos_w[:, 2]
+    height_ramp = torch.clamp((h - lower) / (upper - lower + 1e-6), 0.0, 1.0)
+    upright = torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)
+
+    contact_sensor: ContactSensor = env.scene[sensor_name]
+    assert contact_sensor.data.found is not None
+    in_contact = contact_sensor.data.found > 0  # [B, N_feet]
+    foot_heights = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, N_feet]
+    planted = (in_contact & (foot_heights < foot_height_threshold)).float().mean(dim=1)  # [B]
+
+    return height_ramp * upright * planted
+
+
 def _reset_ramp(env: ManagerBasedRlEnv, ramp_steps: int) -> torch.Tensor | float:
     """Per-env temporal mask in [0, 1] that ramps 0 -> 1 over the first `ramp_steps`
     env-steps of an episode (linear in episode_length_buf).
@@ -1276,29 +1326,57 @@ _POST_UPPER_CACHE_ATTR = "_post_upper_body_cache"
 _HOME_L2_CACHE_ATTR = "_home_l2_cache"
 
 
-def _post_gate(asset: Entity, height_threshold: float = H_STAGE2, band: float = 0.08) -> torch.Tensor:
+# Crouch floor: when a post-task reward opts into `ramp_from`, its height gate fades
+# in LINEARLY from this height up to the standing threshold (full when standing),
+# instead of a narrow band centered on standing. Chosen at the deep-crouch height so
+# the standing rewards start pulling while the robot is still crouched (~0.45 m),
+# giving a gradient across the whole crouch->stand band. Pairs with pelvis_height_bridge.
+_POST_GATE_RAMP_FROM = 0.45
+
+
+def _post_gate(
+    asset: Entity,
+    height_threshold: float = H_STAGE2,
+    band: float = 0.08,
+    ramp_from: float | None = None,
+) -> torch.Tensor:
     """Height × upright gate for post-task and style-standing rewards [B,].
 
-    Height factor: linear ramp 0→1 over [threshold-band, threshold+band].
-    Upright factor: clamp(-proj_grav_z, 0, 1) — 0 when lying, 1 when fully upright.
+    Two height-ramp modes:
+      - ramp_from=None (default): symmetric band ramp 0→1 over [threshold-band,
+        threshold+band]. Used by the style-standing PENALTIES so their active region
+        is unchanged.
+      - ramp_from=<h>: linear ramp 0→1 over [ramp_from, threshold], i.e. fully on when
+        standing and fading in from the crouch floor. Used by the height/upright/
+        anti-jump post terms so they provide a climbing gradient out of the crouch.
+        Requires threshold - ramp_from >= 2*band (else the band ramp is used, so a
+        low-threshold caller like H_STAGE1 can never divide by ~0).
+
+    Upright factor (both modes): clamp(-proj_grav_z, 0, 1) — 0 when lying, 1 upright.
 
     band history (genuine tradeoff — both extremes failed in training):
       - band=0.06 -> ramp [0.59, 0.71]: robot learned to BALLISTICALLY JUMP toward
         ~0.71 m to grab the payoff, then fell (commit 71e6646 shrank it).
       - band=0.02 -> ramp [0.63, 0.67]: near-zero gradient below standing. Run
         2026-07-07_14-50-55 converged to a stable feet-planted CROUCH at ~0.5-0.6 m
-        (farming post_stand_on_feet, own gate 0.50) and stopped climbing: as the
-        assist force decayed 69->44 N, ever_stood crashed 0.12->0.03 while
-        mean_reward kept RISING — a sub-standing local optimum.
-      - band=0.08 (current) -> ramp [0.57, 0.73]: post-task standing rewards fade in
-        from the top of that crouch upward, restoring a climbing gradient out of the
-        local optimum. The co-gated post_base_lin_vel penalty (weight 15) covers the
-        same ramp, damping the old ballistic-jump incentive. If jumping returns
-        (task_head_impact spikes, violent rises in video), dial back toward ~0.05.
+        (farming post_stand_on_feet, own gate 0.50) and stopped climbing.
+      - band=0.08 -> ramp [0.57, 0.73]: fades in from the top of the crouch. Still left
+        a dead zone below 0.57 where the observed crouch (0.4-0.6) mostly sits.
+      - ramp_from mode (current, for the height/upright/anti-jump post terms) reaches
+        the whole way down to _POST_GATE_RAMP_FROM. Ballistic-jump safe because the
+        co-gated post_base_lin_vel penalty (weight 15) rides the SAME ramp and the
+        per-metre gradient is GENTLER than the old narrow band. If jumping returns
+        (task_head_impact spikes, violent rises in video), raise _POST_GATE_RAMP_FROM.
     """
     h = asset.data.root_link_pos_w[:, 2]
     upright = torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)
-    return _standing_gate(h, height_threshold, band=band) * upright
+    if ramp_from is not None and (height_threshold - ramp_from) >= 2.0 * band:
+        height_gate = torch.clamp(
+            (h - ramp_from) / (height_threshold - ramp_from), 0.0, 1.0
+        )
+    else:
+        height_gate = _standing_gate(h, height_threshold, band=band)
+    return height_gate * upright
 
 
 def home_pose_l2(
@@ -1364,7 +1442,11 @@ def post_base_lin_vel(
     """
     asset: Entity = env.scene[asset_cfg.name]
     v = asset.data.root_link_lin_vel_b[:, :3]
-    return torch.exp(-scale * v.pow(2).sum(dim=1)) * _post_gate(asset, height_threshold)
+    # ramp_from: ride the same lowered gate as post_base_height so the jump damper
+    # stays co-active across the whole crouch->stand band (ballistic-jump safety).
+    return torch.exp(-scale * v.pow(2).sum(dim=1)) * _post_gate(
+        asset, height_threshold, ramp_from=_POST_GATE_RAMP_FROM
+    )
 
 
 def post_base_orientation(
@@ -1379,7 +1461,10 @@ def post_base_orientation(
     """
     asset: Entity = env.scene[asset_cfg.name]
     theta_xy = asset.data.projected_gravity_b[:, :2]
-    return torch.exp(-scale * theta_xy.pow(2).sum(dim=1)) * _post_gate(asset, height_threshold)
+    # ramp_from: pull the trunk upright from the crouch upward, not just once standing.
+    return torch.exp(-scale * theta_xy.pow(2).sum(dim=1)) * _post_gate(
+        asset, height_threshold, ramp_from=_POST_GATE_RAMP_FROM
+    )
 
 
 def post_base_height(
@@ -1395,7 +1480,11 @@ def post_base_height(
     """
     asset: Entity = env.scene[asset_cfg.name]
     h = asset.data.root_link_pos_w[:, 2]
-    return torch.exp(-scale * (h - target_height).pow(2)) * _post_gate(asset, height_threshold)
+    # ramp_from: the key climbing reward — pull the pelvis toward target_height from
+    # the crouch upward instead of only rewarding it once already standing.
+    return torch.exp(-scale * (h - target_height).pow(2)) * _post_gate(
+        asset, height_threshold, ramp_from=_POST_GATE_RAMP_FROM
+    )
 
 
 def post_upper_body_posture(

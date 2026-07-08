@@ -656,6 +656,19 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=2.0,  # was 1.0
             params={"asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
+        # BRIDGE reward: dense feet-planted pelvis-height ramp (0.35->0.75 m) that
+        # fills the crouch->stand dead zone where the old stack had no climbing
+        # gradient (height_progress is a delta; post terms gated at 0.65). Not
+        # farmable: requires pelvis height AND upright trunk AND both feet planted
+        # simultaneously (kills the glute-bridge and ballistic-jump exploits). Needs
+        # the foot sensor + site names (set per-robot in env_cfgs.py). See
+        # rewards.pelvis_height_bridge. Weight comparable to the primary task signals.
+        "pelvis_height_bridge": RewardTermCfg(
+            func=mdp.pelvis_height_bridge,
+            weight=5.0,
+            params={"sensor_name": "feet_ground_contact", "lower": 0.35, "upper": 0.75,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
         # Head height: f_tol(h_head, [lower, inf), margin=1, value=0.1). h_head uses
         # torso_link as a proxy (no separate head body); set per-robot (env_cfgs.py).
         # lower=0.794: torso_link at target standing (pelvis 0.75 + waist_roll offset 0.044).
@@ -750,13 +763,17 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # default to G1 in rewards.py.
         "style_shank_orientation": RewardTermCfg(
             func=mdp.style_shank_orientation,
-            weight=8.0,  # was 5.0 — leg geometry signal, now active from the ground up
-            # height_threshold=0.0: shank-verticality reward is live for essentially
-            # the whole episode (gate ~50% at h=0, full by h=0.08 m) instead of only
-            # above ~0.41 m, closing the leg-geometry dead zone that let a torso-lean
-            # strategy earn full task reward without ever loading the legs.
+            weight=8.0,  # was 5.0 — leg geometry signal (weight unchanged, only the gate moved)
+            # height_threshold 0.0 -> 0.30 (gate ~50% at 0.30 m, full by 0.38 m). The
+            # old ground-active gate paid ~full shank reward to a robot LYING DOWN that
+            # just tucked its shanks vertical (knees up), a large farmable term (~3.8/ep,
+            # the single biggest reward) that ALSO fought the standup: extending the legs
+            # to rise from the crouch tilts the shanks and LOSES this reward. Gating it to
+            # ~0.30 m means it no longer pays on the floor and no longer penalises the leg
+            # extension during the crucial crouch->stand transition, while still strongly
+            # rewarding vertical shanks once the robot is genuinely rising/standing.
             params={"lower": 0.8, "margin": 1.0, "value_at_margin": 0.1,
-                    "height_threshold": 0.0,
+                    "height_threshold": 0.30,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Low trunk angular velocity during the rise (exp), weight 1; active > Stage 1.

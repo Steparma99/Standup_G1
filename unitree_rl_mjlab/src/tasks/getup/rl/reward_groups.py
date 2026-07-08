@@ -37,6 +37,8 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "height_progress": "task",
     "prone_recovery": "task",
     "supine_rising_prep": "task",
+    # Crouch->stand bridge: dense feet-planted pelvis-height climbing signal.
+    "pelvis_height_bridge": "task",
     # --- STYLE (HoST definitive): motion shaping ----------------------------------
     "style_waist_yaw_deviation": "style",
     "style_waist_upright": "style",

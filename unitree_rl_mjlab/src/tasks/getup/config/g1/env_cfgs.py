@@ -345,6 +345,8 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["style_foot_displacement"].params["asset_cfg"].site_names = site_names
     cfg.rewards["style_foot_distance"].params["asset_cfg"].site_names = site_names
     cfg.rewards["supine_rising_prep"].params["asset_cfg"].site_names = site_names
+    # Bridge reward needs the foot sites to check feet-planted (anti-jump gate).
+    cfg.rewards["pelvis_height_bridge"].params["asset_cfg"].site_names = site_names
 
     # Post-task upper-body posture: target = HOME standing pose, masked to the
     # upper-body joints (arms + waist); legs/ankles get weight 0 (default).
