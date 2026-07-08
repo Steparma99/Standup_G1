@@ -339,10 +339,21 @@ class AssistanceCurriculum:
         self._force_min = float(p.get("force_min", 0.0))
         self._success_height = float(p["success_height"])
         self._unactuated_steps = int(p.get("unactuated_steps", 0))
-        # Pelvis height (m) below which an episode earns no decay credit (stage-1
-        # entry). Above it the assist anneals in proportion to the peak height
-        # reached, so partial progress still fades the support (see reset()).
-        self._progress_floor = float(p.get("progress_floor", 0.20))
+        # Fix 1 — stable-hold decay gate. The assist only anneals when an env
+        # achieves a GENUINE stand: pelvis above success_height WHILE both feet
+        # are planted, held for `hold_steps` consecutive control steps (matches
+        # the stable_hold success metric, n_hold=50). This replaces the old
+        # partial-credit-on-peak-height gate that retired the support on one-frame
+        # height touches that immediately toppled — the false positive that let the
+        # previous run anneal the lift to ~0 while stable_hold never left ~0.
+        self._hold_steps = int(p.get("hold_steps", 50))
+        # Fix 2 — reversible crutch. An env that fails to hold a stand for
+        # `ramp_up_after` consecutive episodes has its support bumped back up by
+        # `ramp_up_step` N (clamped to the initial force), so a regressed env
+        # recovers instead of collapsing to the zero floor forever. Turns the old
+        # monotonic ratchet into a servo that tracks each env's true competence.
+        self._ramp_up_after = int(p.get("ramp_up_after_failures", 20))
+        self._ramp_up_step = float(p.get("ramp_up_step_n", 5.0))
 
         # Feet-planted qualifier for the decay credit. Only pelvis height reached
         # while BOTH feet are genuinely planted (in ground contact AND not
@@ -361,7 +372,19 @@ class AssistanceCurriculum:
         self._force = torch.full(
             (self._num_envs,), self._initial_force, device=self._device
         )
-        self._peak_height = torch.zeros(self._num_envs, device=self._device)
+        # Consecutive planted steps above success_height this episode (Fix 1).
+        self._hold_counter = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
+        )
+        # Latched True once this episode reached a genuine hold_steps-long stand.
+        self._stable_held = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.bool
+        )
+        # Consecutive FAILED episodes (no stable hold) since the last hold / bump
+        # (Fix 2: drives the support re-ramp).
+        self._fail_streak = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
+        )
         # Reusable zero wrench buffer (N, 1 body, 3).
         self._zeros = torch.zeros(self._num_envs, 1, 3, device=self._device)
 
@@ -370,16 +393,22 @@ class AssistanceCurriculum:
 
     def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
         del env_ids, kwargs  # step events always act on all envs
-        # Track the episode's peak QUALIFIED pelvis height (drives the decay at
-        # reset): height only counts while both feet are planted, so a torso-lean
-        # that lifts the pelvis without loading the legs earns no decay credit.
+        # Track a GENUINE stable hold (drives the decay at reset, Fix 1): the
+        # pelvis must be above success_height WHILE both feet are planted, and
+        # stay there for hold_steps consecutive steps. A torso-lean that spikes
+        # the pelvis without loading the legs never satisfies the planted check,
+        # and a one-frame touch that topples resets the counter — so only a real,
+        # held stand latches _stable_held and retires the assist.
         h = self._asset.data.root_link_pos_w[:, 2]
         both_planted = _both_feet_planted(
             env, self._asset, self._feet_sensor_name, self._foot_site_ids,
             self._foot_height_threshold, self._num_envs, self._device,
         )
-        h_qualified = torch.where(both_planted, h, torch.zeros_like(h))
-        torch.maximum(self._peak_height, h_qualified, out=self._peak_height)
+        holding = (h >= self._success_height) & both_planted
+        self._hold_counter = torch.where(
+            holding, self._hold_counter + 1, torch.zeros_like(self._hold_counter)
+        )
+        self._stable_held |= self._hold_counter >= self._hold_steps
 
         # Upward world-frame force; suppressed during the initial settle phase.
         active = env.episode_length_buf >= self._unactuated_steps
@@ -392,23 +421,35 @@ class AssistanceCurriculum:
     def reset(self, env_ids=None) -> None:
         if env_ids is None:
             env_ids = torch.arange(self._num_envs, device=self._device)
-        # Partial-credit annealing: decay in proportion to how close the episode got
-        # to standing (peak FEET-PLANTED height vs success_height, floored at
-        # progress_floor). peak_height now only accumulates while both feet are
-        # planted (see __call__), so the credit reflects genuine leg-driven rising,
-        # not a torso-lean spike. Full success (peak >= success_height) -> full
-        # decay; partial progress still anneals the assist, so the support fades as
-        # competence grows and the FINAL policy trains (near-)unassisted — closing
-        # the train/eval gap that left the old policy dependent on the 120 N lift.
-        span = max(self._success_height - self._progress_floor, 1e-6)
-        progress = torch.clamp(
-            (self._peak_height[env_ids] - self._progress_floor) / span, 0.0, 1.0
+        held = self._stable_held[env_ids]
+        # Fix 1 — decay only on a genuine held stand (binary credit). Support is
+        # never retired on a one-frame height touch that immediately topples, so
+        # the crutch can no longer outrun real competence (the failure that
+        # cratered the previous run's force to ~0 while stable_hold stayed ~0).
+        self._force[env_ids] = torch.where(
+            held, self._force[env_ids] - self._decay, self._force[env_ids]
         )
+        # Fix 2 — reversible crutch. Track consecutive failed episodes; after
+        # ramp_up_after of them, bump the support back up so a regressed env
+        # recovers instead of sitting at the zero floor forever. The streak
+        # resets on any held stand or on a bump, giving a servo that tracks each
+        # env's competence rather than a one-way ratchet.
+        streak = self._fail_streak[env_ids]
+        streak = torch.where(held, torch.zeros_like(streak), streak + 1)
+        ramp = streak >= self._ramp_up_after
+        self._force[env_ids] = torch.where(
+            ramp, self._force[env_ids] + self._ramp_up_step, self._force[env_ids]
+        )
+        self._fail_streak[env_ids] = torch.where(
+            ramp, torch.zeros_like(streak), streak
+        )
+        # Clamp to [force_min, initial_force] (re-ramp never exceeds the start).
         self._force[env_ids] = torch.clamp(
-            self._force[env_ids] - self._decay * progress, min=self._force_min
+            self._force[env_ids], min=self._force_min, max=self._initial_force
         )
-        # Clear episode peak + any residual applied wrench for the reset envs.
-        self._peak_height[env_ids] = 0.0
+        # Clear episode hold state + any residual applied wrench for reset envs.
+        self._hold_counter[env_ids] = 0
+        self._stable_held[env_ids] = False
         n = len(env_ids) if not isinstance(env_ids, slice) else self._num_envs
         zeros = torch.zeros(n, 1, 3, device=self._device)
         self._asset.write_external_wrench_to_sim(
@@ -471,6 +512,15 @@ class BetaRescalerCurriculum:
         self._decrement = float(p["decrement"])
         self._beta_min = float(p["beta_min"])
         self._success_head_height = float(p["success_head_height"])
+        # Fix 1 — stable-hold decay gate (mirrors AssistanceCurriculum): beta only
+        # decays after a GENUINE held stand (head height above threshold WHILE both
+        # feet planted, for hold_steps consecutive steps), not a one-frame spike.
+        self._hold_steps = int(p.get("hold_steps", 50))
+        # Fix 2 — reversible crutch: restore action authority (bump beta up) after
+        # ramp_up_after consecutive failed episodes, so a regressed env is not
+        # locked at the low-authority floor forever.
+        self._ramp_up_after = int(p.get("ramp_up_after_failures", 20))
+        self._ramp_up_step = float(p.get("ramp_up_step", 0.02))
 
         # Feet-planted qualifier (see _both_feet_planted, shared with
         # AssistanceCurriculum): beta only decays on a GENUINE stand, not a
@@ -485,9 +535,17 @@ class BetaRescalerCurriculum:
         self._beta = torch.full(
             (self._num_envs,), self._initial_beta, device=self._device
         )
-        # Did this episode reach the success head height WHILE both feet planted?
-        self._reached_success = torch.zeros(
+        # Consecutive planted steps above the success head height this episode.
+        self._hold_counter = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
+        )
+        # Latched True once this episode reached a genuine hold_steps-long stand.
+        self._stable_held = torch.zeros(
             self._num_envs, device=self._device, dtype=torch.bool
+        )
+        # Consecutive FAILED episodes since the last hold / bump (Fix 2 re-ramp).
+        self._fail_streak = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
         )
 
         # Expose the per-env beta tensor for the action term / obs / metric.
@@ -495,28 +553,50 @@ class BetaRescalerCurriculum:
 
     def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
         del env_ids, kwargs  # step events always act on all envs
-        # Genuine stand = head-height proxy (torso_link z) at/above threshold AT
-        # THE SAME STEP as both feet planted. Latches for the rest of the episode.
+        # Genuine HELD stand = head-height proxy (torso_link z) at/above threshold
+        # WHILE both feet planted, sustained for hold_steps consecutive steps. A
+        # one-frame spike that topples resets the counter, so beta only decays on a
+        # real hold — not the transient touch that shrank authority prematurely.
         h_head = self._asset.data.body_link_pos_w[:, self._body_id, 2]
         both_planted = _both_feet_planted(
             env, self._asset, self._feet_sensor_name, self._foot_site_ids,
             self._foot_height_threshold, self._num_envs, self._device,
         )
-        self._reached_success |= (h_head >= self._success_head_height) & both_planted
+        holding = (h_head >= self._success_head_height) & both_planted
+        self._hold_counter = torch.where(
+            holding, self._hold_counter + 1, torch.zeros_like(self._hold_counter)
+        )
+        self._stable_held |= self._hold_counter >= self._hold_steps
 
     def reset(self, env_ids=None) -> None:
         if env_ids is None:
             env_ids = torch.arange(self._num_envs, device=self._device)
-        # Decrement beta by a fixed step for envs whose just-ended episode reached
-        # the success head height; clamp at the floor. Binary credit (full step on
-        # success), exactly as HoST specifies for the per-episode decrement rule.
-        succeeded = self._reached_success[env_ids]
-        self._beta[env_ids] = torch.clamp(
-            self._beta[env_ids] - self._decrement * succeeded.to(self._beta.dtype),
-            min=self._beta_min,
+        held = self._stable_held[env_ids]
+        # Fix 1 — decrement beta only after a genuine held stand (binary credit),
+        # not a one-frame head-height touch, so action authority is never withdrawn
+        # on a false positive.
+        self._beta[env_ids] = torch.where(
+            held, self._beta[env_ids] - self._decrement, self._beta[env_ids]
         )
-        # Clear the per-episode success flag for the reset envs.
-        self._reached_success[env_ids] = False
+        # Fix 2 — reversible crutch: after ramp_up_after consecutive failed
+        # episodes, bump beta back up (restore authority); streak resets on any
+        # held stand or bump. Symmetric with the assist-force re-ramp.
+        streak = self._fail_streak[env_ids]
+        streak = torch.where(held, torch.zeros_like(streak), streak + 1)
+        ramp = streak >= self._ramp_up_after
+        self._beta[env_ids] = torch.where(
+            ramp, self._beta[env_ids] + self._ramp_up_step, self._beta[env_ids]
+        )
+        self._fail_streak[env_ids] = torch.where(
+            ramp, torch.zeros_like(streak), streak
+        )
+        # Clamp to [beta_min, initial_beta] (re-ramp never exceeds the start).
+        self._beta[env_ids] = torch.clamp(
+            self._beta[env_ids], min=self._beta_min, max=self._initial_beta
+        )
+        # Clear per-episode hold state for the reset envs.
+        self._hold_counter[env_ids] = 0
+        self._stable_held[env_ids] = False
 
 
 # ---------------------------------------------------------------------------

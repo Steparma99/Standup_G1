@@ -52,12 +52,19 @@ _ADD_POSE_PERTURBATION = False
 # ---------------------------------------------------------------------------
 _ASSIST_CURRICULUM_ENABLE      = True
 _ASSIST_INITIAL_FORCE_N        = 120.0   # ~30% of G1 weight (~400 N); gentle lift
-_ASSIST_FORCE_DECAY_PER_SUCCESS = 5.0    # N removed per successful episode (per env)
+_ASSIST_FORCE_DECAY_PER_SUCCESS = 5.0    # N removed per HELD stand (per env)
 _ASSIST_FORCE_MIN              = 0.0     # fully unassisted floor
 _ASSIST_SUCCESS_HEIGHT         = 0.65    # pelvis height counting as "stood" (task threshold)
-_ASSIST_PROGRESS_FLOOR         = 0.60   # min height for partial-credit decay; must be above
-                                         # the robot's natural lying height (~0.20 m for PRONE
-                                         # + fall_height) so a failed episode earns no credit
+# Fix 1 — decay gate: the assist only retires after a GENUINE held stand (pelvis
+# above success_height WHILE both feet planted, held this many consecutive control
+# steps). Matches the stable_hold success metric (n_hold=50). Replaces the old
+# partial-credit-on-peak-height gate that decayed the lift on one-frame touches.
+_ASSIST_HOLD_STEPS             = 50
+# Fix 2 — reversible crutch: after this many consecutive FAILED episodes (no held
+# stand) an env's support is bumped back up by _ASSIST_RAMP_UP_STEP_N (clamped to
+# the initial force), so a regressed env recovers instead of sitting at 0 forever.
+_ASSIST_RAMP_UP_AFTER_FAILURES = 20
+_ASSIST_RAMP_UP_STEP_N         = 5.0
 _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated/settle
                                          # window (HoST gates pull_force by
                                          # real_episode_length_buf > unactuated_time=30,
@@ -74,9 +81,16 @@ _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated
 # ---------------------------------------------------------------------------
 _BETA_CURRICULUM_ENABLE   = True
 _BETA_INITIAL             = 1.0
-_BETA_DECREMENT           = 0.02   # removed per successful episode (per env)
+_BETA_DECREMENT           = 0.02   # removed per HELD stand (per env)
 _BETA_MIN                 = 0.25   # floor (HoST fixed-beta ablation value)
 _BETA_SUCCESS_HEAD_HEIGHT = 0.75   # was 0.90 — lowered to H_STAGE2+0.10 so curriculum activates once robot learns to stand
+# Fix 1 — beta only decays after a GENUINE held stand (head height above threshold
+# WHILE both feet planted, held this many consecutive steps), not a one-frame spike.
+_BETA_HOLD_STEPS          = 50
+# Fix 2 — restore authority (bump beta up) after this many consecutive failed
+# episodes, so a regressed env is not locked at the low-authority floor forever.
+_BETA_RAMP_UP_AFTER_FAILURES = 20
+_BETA_RAMP_UP_STEP        = 0.02
 
 # ---------------------------------------------------------------------------
 # Reset drop + settling phase.
@@ -417,7 +431,9 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "force_decay_per_success": _ASSIST_FORCE_DECAY_PER_SUCCESS,
                 "force_min": _ASSIST_FORCE_MIN,
                 "success_height": _ASSIST_SUCCESS_HEIGHT,
-                "progress_floor": _ASSIST_PROGRESS_FLOOR,
+                "hold_steps": _ASSIST_HOLD_STEPS,
+                "ramp_up_after_failures": _ASSIST_RAMP_UP_AFTER_FAILURES,
+                "ramp_up_step_n": _ASSIST_RAMP_UP_STEP_N,
                 "unactuated_steps": _ASSIST_UNACTUATED_STEPS,
                 # Feet-planted qualifier: assist-decay credit only accrues while
                 # both feet are genuinely planted, not on torso-lean height spikes.
@@ -448,6 +464,9 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "decrement": _BETA_DECREMENT,
                 "beta_min": _BETA_MIN,
                 "success_head_height": _BETA_SUCCESS_HEAD_HEIGHT,
+                "hold_steps": _BETA_HOLD_STEPS,
+                "ramp_up_after_failures": _BETA_RAMP_UP_AFTER_FAILURES,
+                "ramp_up_step": _BETA_RAMP_UP_STEP,
                 # Feet-planted qualifier: beta only decays on a GENUINE stand
                 # (head height reached WHILE both feet planted), not a torso-lean
                 # spike — same qualifier as the assistance curriculum above.
