@@ -194,7 +194,32 @@ what's already in the codebase.
 feet-planted-qualified peak-height pattern from `AssistanceCurriculum` to
 `BetaRescalerCurriculum`.
 
-### F3 [MEDIUM-HIGH] — 43-DOF action space: fingers add ~50% saturation noise for free
+### F3 [MEDIUM-HIGH] — 43-DOF action space: fingers add ~50% saturation noise for free — ✅ FIXED 2026-07-08
+
+**Update (2026-07-08):** Implemented. Action space is now 29-DOF (fingers
+excluded via `actuator_names=("^(?!.*_hand_).*$",)`); a new zero-action-dim
+`HandHoldAction` term (`mdp/actions.py`) PD-holds the 14 finger joints at a
+fixed, slightly-curled pose (`HAND_HOLD_JOINT_POS` in `g1_constants.py` — the
+Dex3 middle/index/thumb_2 joints have q=0 as a RANGE BOUNDARY, sign-mirrored
+left/right, so they hold 0.2-0.3 rad into range instead of at the hard stop).
+`reg_hand_vel` reward removed (its job is now the hold actuator's damping).
+**Bonus root-cause discovery:** the finger actuator group had NO armature
+configured → numerically near-massless joints → any sustained PD error
+produced ~1e5 rad/s² and diverged (measured: finger qvel → 9e5 rad/s in 20
+steps). This was also the source of the sporadic `joint_vel_explosion`
+terminations (~2/iteration) under the old 43-DOF policy. `G1_ACTUATOR_HAND_HOLD`
+sets `armature=0.004` (≈ the 4010 wrist motor); a 300-step contact-heavy probe
+now shows 0/300 flagged steps vs 2/300 on the pre-change code. Verified:
+env builds (`joint_pos: 29`, `hand_hold: 0`), fingers track hold pose within
+0.3 rad through ground contact, `diag_rewards.py` clean, 2-iteration PPO smoke
+run trains a 29-dim actor with no NaN. Velocity/tracking tasks untouched
+(`G1_ARTICULATION` still uses the original `G1_ACTUATOR_HAND`). Old
+checkpoints are NOT resumable (actor in/out dims changed) — fresh run required,
+which matches the already-decided curricula reset. Original analysis below.
+
+---
+
+**Original finding:**
 
 **Where:** `src/tasks/getup/mdp/actions.py` (43-dim action = 29 body + 14
 finger DOF, confirmed via `total_action_dim=43` and XML actuator groups),

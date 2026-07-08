@@ -1465,7 +1465,6 @@ def post_feet_yaw(
 
 _JOINT_VEL_LIMIT_CACHE = "_joint_vel_limit_cache"
 _ARM_VEL_SOFT_LIMIT_CACHE = "_arm_vel_soft_limit_cache"
-_HAND_VEL_SOFT_LIMIT_CACHE = "_hand_vel_soft_limit_cache"
 
 
 def action_acc_l2_deadzone(
@@ -1478,7 +1477,7 @@ def action_acc_l2_deadzone(
     during standup are free; only violent jerk is penalized.
 
     With actions in [-1,1], max second difference = 4. At deadzone=1.0:
-      per-joint max = (4-1)² = 9  →  43 joints × 9 = 387  →  at weight -0.01 → max ≈ -3.87
+      per-dim max = (4-1)² = 9  →  29 action dims × 9 = 261  →  at weight -0.01 → max ≈ -2.61
     """
     action_acc = (
         env.action_manager.action
@@ -1514,42 +1513,6 @@ def arm_vel_soft_limit(
             [resolve_expr(vel_limits or {}, asset.joint_names, 1e6)], device=env.device
         )  # [1, J]
         setattr(env, _ARM_VEL_SOFT_LIMIT_CACHE, cache)
-    over = torch.clamp(asset.data.joint_vel.abs() - cache, min=0.0)
-    if max_excess is not None:
-        over = over.clamp(max=max_excess)
-    return torch.sum(over, dim=1)
-
-
-def hand_vel_soft_limit(
-    env: ManagerBasedRlEnv,
-    vel_limits: dict[str, float] | None = None,
-    max_excess: float | None = None,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Soft finger velocity threshold: Σ_i clamp(|q̇_i| - limit_i, 0) [B,].
-
-    Identical formula to `arm_vel_soft_limit` but uses a SEPARATE cache
-    (`_HAND_VEL_SOFT_LIMIT_CACHE`) so the two terms do not clobber each other's
-    resolved per-joint limits when both are active on the same env.
-
-    Motivation: the previous `reg_hand_vel` used `joint_vel_l2` (Σ q̇²) with NO
-    threshold, so the passive finger motion during get-up (fingers dragged along the
-    floor, ~1 rad/s each) produced a constant, irreducible penalty the policy could
-    not lower — a pure noise floor. This deadband form is 0 while the fingers move at
-    normal passive speeds and only bites when the policy actively SPINS the fingers
-    past `limit`, which is what we actually want to discourage (wasted DOF / hardware
-    wear). Unmatched joints get limit 1e6 (never penalized).
-
-    EXPLOSION GUARD: `max_excess` caps the per-joint over-limit amount (see
-    arm_vel_soft_limit). Use a negative weight; returns a NON-NEGATIVE violation.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    cache = getattr(env, _HAND_VEL_SOFT_LIMIT_CACHE, None)
-    if cache is None:
-        cache = torch.tensor(
-            [resolve_expr(vel_limits or {}, asset.joint_names, 1e6)], device=env.device
-        )  # [1, J]
-        setattr(env, _HAND_VEL_SOFT_LIMIT_CACHE, cache)
     over = torch.clamp(asset.data.joint_vel.abs() - cache, min=0.0)
     if max_excess is not None:
         over = over.clamp(max=max_excess)

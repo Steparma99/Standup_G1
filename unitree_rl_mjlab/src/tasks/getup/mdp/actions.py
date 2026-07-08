@@ -23,13 +23,20 @@ from mjlab.envs.mdp.actions.actions import (
     JointPositionAction,
     JointPositionActionCfg,
 )
+from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
+from mjlab.utils.lab_api.string import resolve_matching_names_values
 
 from .events import _BETA_RESCALER_ATTR
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
-__all__ = ["LowPassJointPositionAction", "LowPassJointPositionActionCfg"]
+__all__ = [
+    "HandHoldAction",
+    "HandHoldActionCfg",
+    "LowPassJointPositionAction",
+    "LowPassJointPositionActionCfg",
+]
 
 
 class LowPassJointPositionAction(JointPositionAction):
@@ -208,6 +215,91 @@ class LowPassJointPositionAction(JointPositionAction):
         self._set_if_present(manager, "prev_prev_action", zeros, env_ids)
         self._set_if_present(self, "_raw_actions", zeros, env_ids)
         self._set_if_present(self, "_processed_actions", default, env_ids)
+
+
+class HandHoldAction(ActionTerm):
+    """Zero-action-dim term that PD-holds a joint group at a fixed target pose.
+
+    Removes the matched joints from the policy's action space (contributes 0 to
+    total_action_dim) while still actively commanding them: apply_actions() —
+    called every physics substep, same hook as the main joint_pos term — writes
+    a constant joint position target that the entity's builtin PD actuators
+    servo to. This makes the "fingers are held, not policy-driven" behavior an
+    explicit, configurable part of the action config instead of relying on
+    mjlab's reset-time zeroing of joint_pos_target (which only coincidentally
+    equals a sensible finger pose while every keyframe leaves fingers at 0).
+
+    The target is NOT default_joint_pos: several G1 finger joints have q=0 as a
+    range boundary, so the hold pose is given explicitly via `target_joint_pos`
+    (regex -> radians; unmatched joints hold at 0.0).
+    """
+
+    cfg: "HandHoldActionCfg"
+
+    def __init__(self, cfg: "HandHoldActionCfg", env: "ManagerBasedRlEnv"):
+        super().__init__(cfg, env)
+        target_ids, target_names = self._entity.find_joints_by_actuator_names(
+            cfg.actuator_names
+        )
+        assert len(target_ids) > 0, (
+            f"HandHoldAction: actuator_names={cfg.actuator_names!r} matched no "
+            "actuated joints."
+        )
+        self._target_ids = torch.tensor(
+            target_ids, device=self.device, dtype=torch.long
+        )
+        target = torch.zeros(len(target_ids), device=self.device)
+        if cfg.target_joint_pos:
+            idx, _, vals = resolve_matching_names_values(
+                cfg.target_joint_pos, target_names
+            )
+            target[idx] = torch.tensor(vals, device=self.device, dtype=target.dtype)
+        # [B, N] fixed hold target; [B, 0] raw-action placeholder.
+        self._target = target.unsqueeze(0).expand(self.num_envs, -1).contiguous()
+        self._raw_actions = torch.zeros(self.num_envs, 0, device=self.device)
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_action(self) -> torch.Tensor:
+        return self._raw_actions
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        del actions  # [B, 0] slice — nothing to consume.
+
+    def apply_actions(self) -> None:
+        self._entity.set_joint_position_target(
+            self._target, joint_ids=self._target_ids
+        )
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        # Entity.reset() zeroes joint_pos_target for ALL joints; re-assert the
+        # hold target so the fingers never see a 0-rad (range-boundary) command,
+        # not even for the first post-reset substep. The target is identical for
+        # every env, so writing all envs (ignoring env_ids) is both correct and
+        # sidesteps set_joint_position_target's elementwise (non-outer)
+        # tensor×tensor indexing when env_ids and joint_ids are both tensors.
+        del env_ids
+        self._entity.set_joint_position_target(
+            self._target, joint_ids=self._target_ids
+        )
+
+
+@dataclass(kw_only=True)
+class HandHoldActionCfg(ActionTermCfg):
+    """Configuration for HandHoldAction."""
+
+    actuator_names: tuple[str, ...] | list[str]
+    """Regex patterns (matched against actuated joint names, same semantics as
+    the main joint_pos term) selecting the joints to hold."""
+
+    target_joint_pos: dict[str, float] | None = None
+    """Hold pose: regex -> target angle (rad). Unmatched joints hold at 0.0."""
+
+    def build(self, env: "ManagerBasedRlEnv") -> "HandHoldAction":
+        return HandHoldAction(self, env)
 
 
 @dataclass(kw_only=True)

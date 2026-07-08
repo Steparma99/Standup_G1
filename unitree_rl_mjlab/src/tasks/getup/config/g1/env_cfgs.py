@@ -2,7 +2,10 @@
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
-from src.tasks.getup.mdp.actions import LowPassJointPositionActionCfg
+from src.tasks.getup.mdp.actions import (
+    HandHoldActionCfg,
+    LowPassJointPositionActionCfg,
+)
 from src.tasks.getup.mdp.events import AssistanceCurriculum, BetaRescalerCurriculum
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.metrics_manager import MetricsTermCfg
@@ -12,6 +15,7 @@ import src.tasks.getup.mdp as mdp
 
 from src.assets.robots import get_g1_supine_robot_cfg_host
 from src.assets.robots.unitree_g1.g1_constants import (
+    HAND_HOLD_JOINT_POS,
     HOME_KEYFRAME,
     PRONE_KEYFRAME,
     # SEATED_KEYFRAME,  # temporarily disabled — not a static equilibrium without
@@ -323,6 +327,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Settling phase: hold the policy for the first _SETTLE_STEPS steps so the robot
     # accommodates onto the floor before it takes control.
     joint_pos_action.settle_steps = _SETTLE_STEPS
+    # Fingers: PD-held at the G1 hold pose (policy action space excludes them).
+    hand_hold_action = cfg.actions["hand_hold"]
+    assert isinstance(hand_hold_action, HandHoldActionCfg)
+    hand_hold_action.target_joint_pos = dict(HAND_HOLD_JOINT_POS)
 
     # Viewer follows torso.
     cfg.viewer.body_name = "torso_link"

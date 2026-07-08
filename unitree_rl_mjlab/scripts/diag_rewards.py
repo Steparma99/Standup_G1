@@ -275,7 +275,7 @@ def firing_range_scan(env: ManagerBasedRlEnv) -> None:
     states.append(("HOME_still", _weighted_vec_env0(env)))
 
     # (b) HOME standing but spinning/translating fast + fast joints -> velocity penalties
-    #     fire (reg_arm_vel, reg_hand_vel, joint_vel_limits) and post velocity rewards drop.
+    #     fire (reg_arm_vel, joint_vel_limits) and post velocity rewards drop.
     fast_jvel = _set_joints(
         torch.zeros_like(home_j), names,
         {"shoulder": 20.0, "elbow": 20.0, "wrist": 20.0, "hand": 12.0},

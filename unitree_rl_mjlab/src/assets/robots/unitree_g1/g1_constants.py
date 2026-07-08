@@ -179,6 +179,54 @@ G1_ACTUATOR_HAND = BuiltinPositionActuatorCfg(
   effort_limit=1.4,
 )
 
+# Get-up task only: fingers are NOT policy-actuated (removed from the action
+# space); a HandHoldAction term PD-holds them at HAND_HOLD_JOINT_POS instead.
+# Same soft stiffness as G1_ACTUATOR_HAND, damping doubled — with no command
+# stream the Kd is the only regularizer against floor-drag backdriving the
+# fingers, so a bit more dissipation gives a calmer, still-compliant hold.
+# armature: G1_ACTUATOR_HAND sets none, leaving the finger joints numerically
+# near-massless — a sustained PD error then produces ~1e5 rad/s² accelerations
+# and the discrete-time PD diverges (measured: finger qvel -> 1e5+ rad/s within
+# 20 steps of holding a 0.2 rad offset; also the source of the sporadic
+# joint_vel_explosion terminations under the old 43-DOF policy whenever an
+# action created a finger target error). The Dex3 finger gearmotors physically
+# have reflected inertia; 0.004 kg·m² (≈ the 4010 wrist motor's 0.00425) puts
+# the PD deep in the stable region (kp·dt²/I ≈ 0.03, kd·dt/I ≈ 0.5).
+# Used ONLY by G1_ARTICULATION_HOST; velocity/tracking keep G1_ACTUATOR_HAND.
+G1_ACTUATOR_HAND_HOLD = BuiltinPositionActuatorCfg(
+  target_names_expr=(r".*_hand_(thumb|middle|index)_\d_joint",),
+  stiffness=5.0,
+  damping=0.4,
+  effort_limit=1.4,
+  armature=0.004,
+)
+
+# Fixed finger hold pose for the get-up task (radians), consumed by
+# HandHoldActionCfg.target_joint_pos. Several finger joints have q=0 as a
+# mechanical RANGE BOUNDARY (left middle/index curl negative, right positive —
+# the Dex3 hands are sign-mirrored; thumb_2 likewise: left [0, 1.75], right
+# [-1.75, 0]). Holding exactly at a hard-stop boundary invites limit chatter
+# under contact, so those joints get a small curl INTO their range — a relaxed,
+# slightly-curled hand that also keeps fingertips off the ground during palm
+# push-off. Joints with an interior 0 (thumb_0, thumb_1) hold at 0. Do NOT
+# rely on default_joint_pos for this — it is 0.0 for all fingers (no keyframe
+# sets them), which is exactly the boundary pose we are avoiding.
+HAND_HOLD_JOINT_POS: dict[str, float] = {
+  # Left hand: curl direction is negative.
+  "left_hand_middle_0_joint": -0.2,
+  "left_hand_middle_1_joint": -0.3,
+  "left_hand_index_0_joint": -0.2,
+  "left_hand_index_1_joint": -0.3,
+  "left_hand_thumb_2_joint": 0.2,   # range [0, 1.75] — curl is positive
+  # Right hand: mirrored, curl direction is positive.
+  "right_hand_middle_0_joint": 0.2,
+  "right_hand_middle_1_joint": 0.3,
+  "right_hand_index_0_joint": 0.2,
+  "right_hand_index_1_joint": 0.3,
+  "right_hand_thumb_2_joint": -0.2,  # range [-1.75, 0] — curl is negative
+  # thumb_0 ([-1.05, 1.05]) and thumb_1 (interior 0) default to 0.0 (unlisted).
+}
+
 # Waist pitch/roll and ankles are 4-bar linkages with 2 5020 actuators.
 # Due to the parallel linkage, the effective armature at the ankle and waist joints
 # is configuration dependent. Since the exact geometry of the linkage is unknown, we
@@ -537,7 +585,7 @@ G1_ARTICULATION_HOST = EntityArticulationInfoCfg(
     G1_ACTUATOR_4010,
     G1_ACTUATOR_WAIST,
     G1_ACTUATOR_ANKLE,
-    G1_ACTUATOR_HAND,
+    G1_ACTUATOR_HAND_HOLD,
   ),
   soft_joint_pos_limit_factor=0.98,
 )
