@@ -67,6 +67,7 @@ REWARD_GROUP_MAP: dict[str, str] = {
     # --- POST-TASK (HoST definitive): hold the standing state, gated h>H_STAGE2 -----
     "post_base_ang_vel": "post_task",
     "post_base_lin_vel": "post_task",
+    "anti_jump_velocity": "post_task",
     "post_base_orientation": "post_task",
     "post_base_height": "post_task",
     "post_upper_body_posture": "post_task",

@@ -52,7 +52,11 @@ _ADD_POSE_PERTURBATION = False
 # ---------------------------------------------------------------------------
 _ASSIST_CURRICULUM_ENABLE      = True
 _ASSIST_INITIAL_FORCE_N        = 120.0   # ~30% of G1 weight (~400 N); gentle lift
-_ASSIST_FORCE_DECAY_PER_SUCCESS = 5.0    # N removed per HELD stand (per env)
+# Slowed 5.0 -> 2.0: the previous runs collapsed because the force decayed toward 0
+# faster than the shared policy internalised the UNAIDED stand (crutch-dependence:
+# stable_hold peaked ~110 N then fell monotonically to it). Removing less force per
+# held stand gives the policy many more episodes at each force level to adapt.
+_ASSIST_FORCE_DECAY_PER_SUCCESS = 2.0    # N removed per HELD stand (per env)
 _ASSIST_FORCE_MIN              = 0.0     # fully unassisted floor
 _ASSIST_SUCCESS_HEIGHT         = 0.65    # pelvis height counting as "stood" (task threshold)
 # Fix 1 — decay gate: the assist only retires after a GENUINE held stand (pelvis
@@ -63,7 +67,8 @@ _ASSIST_HOLD_STEPS             = 50
 # Fix 2 — reversible crutch: after this many consecutive FAILED episodes (no held
 # stand) an env's support is bumped back up by _ASSIST_RAMP_UP_STEP_N (clamped to
 # the initial force), so a regressed env recovers instead of sitting at 0 forever.
-_ASSIST_RAMP_UP_AFTER_FAILURES = 20
+_ASSIST_RAMP_UP_AFTER_FAILURES = 10      # was 20 — recover support faster so the
+                                         # servo tracks true competence, not a ratchet
 _ASSIST_RAMP_UP_STEP_N         = 5.0
 _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated/settle
                                          # window (HoST gates pull_force by
@@ -81,7 +86,8 @@ _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated
 # ---------------------------------------------------------------------------
 _BETA_CURRICULUM_ENABLE   = True
 _BETA_INITIAL             = 1.0
-_BETA_DECREMENT           = 0.02   # removed per HELD stand (per env)
+_BETA_DECREMENT           = 0.01   # was 0.02 — pace authority withdrawal with the
+                                   # slower assist-force decay (avoid crutch-dependence)
 _BETA_MIN                 = 0.25   # floor (HoST fixed-beta ablation value)
 _BETA_SUCCESS_HEAD_HEIGHT = 0.75   # was 0.90 — lowered to H_STAGE2+0.10 so curriculum activates once robot learns to stand
 # Fix 1 — beta only decays after a GENUINE held stand (head height above threshold
@@ -89,7 +95,7 @@ _BETA_SUCCESS_HEAD_HEIGHT = 0.75   # was 0.90 — lowered to H_STAGE2+0.10 so cu
 _BETA_HOLD_STEPS          = 50
 # Fix 2 — restore authority (bump beta up) after this many consecutive failed
 # episodes, so a regressed env is not locked at the low-authority floor forever.
-_BETA_RAMP_UP_AFTER_FAILURES = 20
+_BETA_RAMP_UP_AFTER_FAILURES = 10   # was 20 — recover authority faster (matches assist)
 _BETA_RAMP_UP_STEP        = 0.02
 
 # ---------------------------------------------------------------------------

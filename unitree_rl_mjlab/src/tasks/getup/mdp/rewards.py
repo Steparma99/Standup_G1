@@ -1016,6 +1016,10 @@ def style_ang_vel_xy(
 
 H_STAGE1 = 0.45  # righting -> rising boundary [m]
 H_STAGE2 = 0.65  # rising -> standing boundary [m]
+# "Fully standing at HOME" gate used by the low-velocity STILLNESS rewards
+# (post_base_lin_vel / post_base_ang_vel). Higher than H_STAGE2 so those terms only
+# demand stillness once the robot is genuinely up at HOME — never during the rise.
+_HOME_HEIGHT = 0.72
 
 
 def f_tol(
@@ -1244,17 +1248,22 @@ def style_shank_orientation(
 
 def style_base_ang_vel(
     env: ManagerBasedRlEnv,
-    scale: float = 2.0,
+    v_free: float = 0.8,
+    margin: float = 2.0,
+    value_at_margin: float = 0.1,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """HoST style base ang-vel: exp(-2·||w_xy||²) · 1(h>H_STAGE1) [B,].
+    """HoST style base ang-vel: DEAD-ZONED trunk-spin reward during the rise [B,].
 
-    Positive reward for low horizontal-plane base angular velocity during the rise
-    (stabilizes the trunk). A separate, stronger version lives in the post-task group.
+    f_tol(||w_xy||, [0, v_free], margin) · 1(h>H_STAGE1): full reward while the trunk's
+    horizontal angular speed stays under v_free rad/s (a normal rise is free), decaying
+    only for violent spin. Rise-gated (h>H_STAGE1) so it shapes trunk stability WHILE
+    getting up; the stronger HOME-gated stillness version lives in the post-task group.
+    Reshaped from the old exp(-scale·||w||²) form, which penalised any rotation.
     """
     asset: Entity = env.scene[asset_cfg.name]
-    w_xy = asset.data.root_link_ang_vel_b[:, :2]
-    r = torch.exp(-scale * w_xy.pow(2).sum(dim=1))
+    w = asset.data.root_link_ang_vel_b[:, :2].norm(dim=1)
+    r = f_tol(w, 0.0, v_free, margin, value_at_margin)
     gate = _standing_gate(asset.data.root_link_pos_w[:, 2], H_STAGE1, band=0.04)
     return r * gate
 
@@ -1420,31 +1429,74 @@ def home_pose_l2(
 
 def post_base_ang_vel(
     env: ManagerBasedRlEnv,
-    scale: float = 2.0,
-    height_threshold: float = H_STAGE2,
+    v_free: float = 0.5,
+    margin: float = 1.5,
+    value_at_margin: float = 0.1,
+    height_threshold: float = _HOME_HEIGHT,
+    band: float = 0.05,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Post-task base ang-vel: exp(-2·||w_xy||²) · 1(h>H_STAGE2). Still trunk [B,]."""
+    """Post-task base ang-vel STILLNESS reward, DEAD-ZONED and HOME-gated [B,].
+
+    f_tol(||w_xy||, [0, v_free], margin) · HOME_gate: full reward 1.0 while the trunk's
+    horizontal-plane angular speed stays under v_free rad/s (a small-adjustment dead
+    zone), decaying only above it. Gated to _HOME_HEIGHT (not H_STAGE2) so it demands
+    stillness ONLY once fully standing at HOME — never during the rise. Reshaped from
+    the old exp(-scale·||w||²) form, which peaked only at w=0 and penalised any motion.
+    """
     asset: Entity = env.scene[asset_cfg.name]
-    w_xy = asset.data.root_link_ang_vel_b[:, :2]
-    return torch.exp(-scale * w_xy.pow(2).sum(dim=1)) * _post_gate(asset, height_threshold)
+    w = asset.data.root_link_ang_vel_b[:, :2].norm(dim=1)
+    return f_tol(w, 0.0, v_free, margin, value_at_margin) * _post_gate(
+        asset, height_threshold, band=band
+    )
 
 
 def post_base_lin_vel(
     env: ManagerBasedRlEnv,
-    scale: float = 5.0,
+    v_free: float = 0.3,
+    margin: float = 0.7,
+    value_at_margin: float = 0.1,
+    height_threshold: float = _HOME_HEIGHT,
+    band: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task base lin-vel STILLNESS reward, DEAD-ZONED and HOME-gated [B,].
+
+    f_tol(||v||, [0, v_free], margin) · HOME_gate: full reward 1.0 while the base speed
+    stays under v_free m/s (dead zone for small in-place adjustments), decaying above.
+    Gated to _HOME_HEIGHT so stillness is required ONLY when fully standing at HOME and
+    NEVER during the rise (the old exp form, gated from the crouch up at weight 15,
+    penalised exactly the push-off velocity the robot needs to get up). Jumping is now
+    handled separately by anti_jump_velocity (an explicit high-speed penalty active from
+    the rise up), not by this reward.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    speed = asset.data.root_link_lin_vel_b[:, :3].norm(dim=1)
+    return f_tol(speed, 0.0, v_free, margin, value_at_margin) * _post_gate(
+        asset, height_threshold, band=band
+    )
+
+
+def anti_jump_velocity(
+    env: ManagerBasedRlEnv,
+    v_high: float = 1.5,
+    cap: float = 3.0,
     height_threshold: float = H_STAGE2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Post-task base lin-vel: exp(-scale·||v||²) · gate. Penalizes all 3D velocity [B,].
+    """Anti ballistic-jump penalty: squared base-speed EXCESS above v_high [B,].
 
-    Includes vertical velocity (v_z) to directly penalize jumping after standup.
+    Σ clamp(||v|| - v_high, 0, cap)² · gate. Returns a NON-NEGATIVE value — use with a
+    NEGATIVE weight. Normal rise / stepping speeds sit under v_high (m/s) and are NOT
+    penalised (dead zone below the threshold); only a launch is hit. Gated from
+    _POST_GATE_RAMP_FROM (0.45 m) upward so it stays active THROUGHOUT the rise — where
+    the jump-to-stand exploit lives — not just once standing. `cap` bounds the per-step
+    penalty so a fall/blow-up transient cannot explode the term.
     """
     asset: Entity = env.scene[asset_cfg.name]
-    v = asset.data.root_link_lin_vel_b[:, :3]
-    # ramp_from: ride the same lowered gate as post_base_height so the jump damper
-    # stays co-active across the whole crouch->stand band (ballistic-jump safety).
-    return torch.exp(-scale * v.pow(2).sum(dim=1)) * _post_gate(
+    speed = asset.data.root_link_lin_vel_b[:, :3].norm(dim=1)
+    excess = torch.clamp(speed - v_high, min=0.0, max=cap)
+    return excess.pow(2) * _post_gate(
         asset, height_threshold, ramp_from=_POST_GATE_RAMP_FROM
     )
 

@@ -777,10 +777,13 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Low trunk angular velocity during the rise (exp), weight 1; active > Stage 1.
+        # Rise-phase trunk-spin reward, now DEAD-ZONED (f_tol): a normal rise rotation is
+        # free (under v_free rad/s), only violent spin is shaped. Stays rise-gated
+        # (h>H_STAGE1). Weight softened 3.0 -> 1.5 (velocity is fine during the rise).
         "style_base_ang_vel": RewardTermCfg(
             func=mdp.style_base_ang_vel,
-            weight=3.0,  # was 1.0 — penalize trunk spinning during rise (>H_STAGE1)
-            params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
+            weight=1.5,  # was 3.0
+            params={"v_free": 0.8, "margin": 2.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Ankle parallel: binary +20 (highest style weight) when both feet are flat.
         # The +20 magnitude lives in the function, so weight=1.0 (binary-term convention).
@@ -931,13 +934,25 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # standing state. All terms gated by the HARD indicator 1(h_base > H_STAGE2
         # = 0.65); zero until standing. Weights all 10 except feet_parallel = 2.5.
         # ===================================================================
+        # Stillness rewards, DEAD-ZONED (f_tol) + HOME-gated: full reward while the base
+        # is slow (small in-place adjustments free), decaying only above the threshold,
+        # and active ONLY once fully standing at HOME (_HOME_HEIGHT) — never during the
+        # rise. Weights lowered from the old exp-form (which pinned v->0 from the crouch
+        # up and fought the push-off). Jump safety moved to anti_jump_velocity below.
         "post_base_ang_vel": RewardTermCfg(
-            func=mdp.post_base_ang_vel, weight=10.0,
-            params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
+            func=mdp.post_base_ang_vel, weight=4.0,  # was 10.0
+            params={"v_free": 0.5, "margin": 1.5, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_base_lin_vel": RewardTermCfg(
-            func=mdp.post_base_lin_vel, weight=15.0,
-            params={"scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
+            func=mdp.post_base_lin_vel, weight=6.0,  # was 15.0
+            params={"v_free": 0.3, "margin": 0.7, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Anti ballistic-jump: squared base-speed EXCESS above v_high (1.5 m/s), gated
+        # from the crouch (0.45 m) upward so it blocks a launch DURING the rise too.
+        # Negative weight; normal rise speeds sit under v_high and are unpenalised.
+        "anti_jump_velocity": RewardTermCfg(
+            func=mdp.anti_jump_velocity, weight=-3.0,
+            params={"v_high": 1.5, "cap": 3.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "post_base_orientation": RewardTermCfg(
             func=mdp.post_base_orientation, weight=10.0,
@@ -962,10 +977,16 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # (exactly when a fine-tuning run needs the signal most).
         # Returns a positive value; use with a NEGATIVE weight.
         # target_joint_pos and joint_weights set per-robot in env_cfgs.py (HOME pose).
+        # POSITIVE "climax toward HOME" reward (was the home_pose_l2 penalty, weight -3.0).
+        # standing_posture = exp(-kp·Σ w·(q-q*)²) · standing_gate ∈ (0,1]: bounded, peaks
+        # at the HOME pose, and NEVER punishes a struggling stand (the old L2 penalty grew
+        # with distance from HOME, actively repelling the robot from the standing basin the
+        # moment its posture was imperfect — exactly when the assist force was withdrawn).
+        # Same target_joint_pos / joint_weights dicts (set per-robot in env_cfgs.py).
         "post_standing_posture": RewardTermCfg(
-            func=mdp.home_pose_l2, weight=-3.0,
+            func=mdp.standing_posture, weight=5.0,
             params={"target_joint_pos": {}, "joint_weights": {},
-                    "height_threshold": 0.65,
+                    "pelvis_height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Both-feet grounded reward: 0.5 for one foot, 1.0 for both. Directly penalizes
