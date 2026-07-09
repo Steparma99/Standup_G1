@@ -16,12 +16,21 @@ It prints two things:
      the ankles in pitch and roll) so you can SEE exactly where the +20 turns on/off
      and recalibrate `tilt_threshold` if 0.05 is not where you want it.
 
+  3. A focused NEW / RESHAPED reward readout (`--new`): the terms added or reshaped in
+     the posture-fix pass (post_standing_posture, com_over_support, style_waist_upright,
+     post_feet_yaw, hand-contact) evaluated at HOME(perfect) vs standing(bad) vs fallen,
+     PLUS two gradient sweeps (post_standing_posture vs per-joint error; com_over_support
+     vs base pitch) that prove the fixes give a smooth, non-saturating signal.
+
 Run:
   cd unitree_rl_mjlab
-  CUDA_VISIBLE_DEVICES="" MUJOCO_GL=egl python scripts/diag_rewards.py
+  CUDA_VISIBLE_DEVICES="" MUJOCO_GL=egl python scripts/diag_rewards.py          # everything
+  CUDA_VISIBLE_DEVICES="" MUJOCO_GL=egl python scripts/diag_rewards.py --new    # new terms only
+  CUDA_VISIBLE_DEVICES="" MUJOCO_GL=egl python scripts/diag_rewards.py --from-home 80  # stand->fall
 """
 
 import argparse
+import math
 import os
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -768,6 +777,255 @@ def standing_fall_timeseries(env: ManagerBasedRlEnv, steps: int) -> None:
     )
 
 
+# Terms added / reshaped in the 2026-07-09 posture-fix pass. This focused view lets
+# you read their numbers directly at HOME, when standing, and when fallen — and SEE the
+# non-saturating gradient of the two key fixes (post_standing_posture, com_over_support).
+NEW_TERMS = (
+    "post_standing_posture",   # normalized metric (was 0.0000 all last run)
+    "com_over_support",        # NEW: CoM proxy over foot-support polygon
+    "style_waist_upright",     # penalty -> positive f_tol reward
+    "post_feet_yaw",           # scale 10 -> 2 (de-saturate)
+    "style_hand_left_contact", # now height-gated to standing
+    "style_hand_right_contact",
+)
+
+
+def _pitch_quat(theta: float) -> list[float]:
+    """(w,x,y,z) quaternion for a base pitch of `theta` rad about the body y-axis."""
+    return [math.cos(theta / 2.0), 0.0, math.sin(theta / 2.0), 0.0]
+
+
+# Pelvis heights (m) swept by the activation audit — from flat-on-floor to full stand.
+_AUDIT_HEIGHTS = (0.15, 0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.72, 0.75)
+
+
+def activation_audit(env: ManagerBasedRlEnv) -> None:
+    """Check WHERE (at what pelvis height) every reward term switches on / off.
+
+    The robot is teleported to an UPRIGHT HOME-joint pose at a ladder of pelvis heights
+    (0.15 m = flat on floor ... 0.75 m = standing), zero velocity, and every reward term
+    is evaluated. Because the pose is fixed and only the height changes, the column where
+    a term goes from 0 to non-zero is its ACTIVATION HEIGHT — exactly the "correct moment
+    of activation" check.
+
+    Two caveats are surfaced, not hidden:
+      * Contact terms (post_stand_on_feet, style_hand_*_contact) need REAL geometric
+        contact, which a free-floating teleport does not create — they read 0 here even
+        where their gate is open. Their gate curve is shown separately below, and the
+        hand-contact-on-floor question is answered by its own probe.
+      * Stillness/velocity rewards (post_base_lin/ang_vel) fire at their MAX here (zero
+        velocity) wherever their height gate is open — so this sweep shows their gate.
+    """
+    from src.tasks.getup.mdp import rewards as R  # private gate fns for the gate-curve table
+
+    rm = env.reward_manager
+    asset, names, home_j, home_root = _home_base(env)
+    ids0 = torch.tensor([0])
+    term_names = list(rm._term_names)
+
+    # --- Gate-curve table: the raw gate multipliers vs height (upright) --------------
+    gc = PrettyTable()
+    gc.field_names = ["pelvis h (m)", "stage1 gate(0.45)", "stage2/post gate(0.65)", "home gate(0.72)"]
+    gc.align = "r"
+    for h in _AUDIT_HEIGHTS:
+        root = home_root.clone(); root[0, 2] = h
+        asset.write_root_link_pose_to_sim(root, env_ids=ids0)
+        asset.write_root_link_velocity_to_sim(torch.zeros(1, 6), env_ids=ids0)
+        asset.write_joint_state_to_sim(home_j, torch.zeros_like(home_j), env_ids=ids0)
+        env.sim.forward()
+        hp = asset.data.root_link_pos_w[:, 2]  # [B]
+        g1 = R._standing_gate(hp, 0.45, band=0.04)[0].item()
+        g2 = R._post_gate(asset, 0.65)[0].item()          # hand-contact + post-term gate
+        gh = R._standing_gate(hp, 0.72, band=0.05)[0].item()
+        gc.add_row([f"{h:.2f}", f"{g1:.2f}", f"{g2:.2f}", f"{gh:.2f}"])
+    print("\n=== ACTIVATION AUDIT — GATE CURVES vs pelvis height (upright) ===")
+    print(gc)
+    print(
+        "0.00 = term fully OFF at that height, 1.00 = fully ON. These are the height gates used\n"
+        "by the post_task / style-standing terms. Read the height where a column crosses ~0.5 as\n"
+        "that family's switch-on. (hand_contact_penalty does NOT use these — it uses a LATCH,\n"
+        "shown in its own probe below.)"
+    )
+
+    # --- Full height sweep of every reward term (weighted) --------------------------
+    rows = {}
+    for h in _AUDIT_HEIGHTS:
+        root = home_root.clone(); root[0, 2] = h
+        asset.write_root_link_pose_to_sim(root, env_ids=ids0)
+        asset.write_root_link_velocity_to_sim(torch.zeros(1, 6), env_ids=ids0)
+        asset.write_joint_state_to_sim(home_j, torch.zeros_like(home_j), env_ids=ids0)
+        env.sim.forward()
+        rows[h] = _weighted_vec_env0(env)
+
+    tbl = PrettyTable()
+    tbl.field_names = ["reward term", "group", "wt", *[f"{h:.2f}" for h in _AUDIT_HEIGHTS]]
+    tbl.align = "r"; tbl.align["reward term"] = "l"; tbl.align["group"] = "l"
+    for name in term_names:
+        cfg = rm.get_term_cfg(name)
+        vals = [rows[h].get(name, float("nan")) for h in _AUDIT_HEIGHTS]
+        # Only print terms that MOVE across the sweep (hide the always-0 weight-0 disables).
+        if all(abs(v) < 1e-4 for v in vals if v == v):
+            continue
+        tbl.add_row([name, REWARD_GROUP_MAP.get(name, "?"), f"{cfg.weight:g}",
+                     *[f"{v:+.2f}" for v in vals]])
+    print("\n=== ACTIVATION AUDIT — every term vs pelvis height (upright HOME pose, zero vel) ===")
+    print(tbl)
+    print(
+        "Each row: the height column where the value leaves 0 is the term's activation height.\n"
+        "Terms absent from this table are the weight-0 Phase-1 disables (always 0) OR contact/\n"
+        "motion terms that need real contact/velocity (see the hand-contact probe below)."
+    )
+
+    # --- Hand-contact LATCH probe: the user's specific design -----------------------
+    #   The penalty is ACTIVE during the whole push-off/rise and LATCHES OFF for the rest
+    #   of the episode once the pelvis first reaches HOME (~0.72 m). A later fall does NOT
+    #   re-arm it. A static teleport won't produce real hand-floor contact, so we compute
+    #   the penalty a fixed REFERENCE 30 N push WOULD cost, and drive env 0 through a
+    #   height sequence that reaches HOME then falls, reading the latch after each step.
+    from src.tasks.getup.mdp import events as EV
+
+    print("\n=== HAND-CONTACT LATCH PROBE — penalty for a 30 N push over an episode ===")
+    cfgL = rm.get_term_cfg("style_hand_left_contact")
+    free_force = cfgL.params.get("free_force", 8.0)
+    force_scale = cfgL.params.get("force_scale", 10.0)
+    latch_h = cfgL.params.get("latch_height", 0.72)
+    ref_force = 30.0
+    excess = max(0.0, min(ref_force - free_force, 5.0 * force_scale))
+    raw_pen = math.exp(excess / force_scale) - 1.0  # ungated raw penalty magnitude
+
+    state = EV.get_episode_state(env, asset)
+    state["ever_reached_home"][:] = False  # start of a fresh episode
+
+    hc = PrettyTable()
+    hc.field_names = ["step (scenario)", "pelvis h", "reached HOME?",
+                      "penalty active?", "APPLIED penalty (30N push)"]
+    hc.align = "r"; hc.align["step (scenario)"] = "l"
+    sequence = [
+        ("1 on-ground (push-off)", 0.30),
+        ("2 mid-rise",             0.55),
+        ("3 reaches HOME",         0.72),
+        ("4 FALLS back down",      0.30),
+        ("5 still fallen",         0.25),
+    ]
+    for label, h in sequence:
+        root = home_root.clone(); root[0, 2] = h
+        asset.write_root_link_pose_to_sim(root, env_ids=ids0)
+        asset.write_root_link_velocity_to_sim(torch.zeros(1, 6), env_ids=ids0)
+        asset.write_joint_state_to_sim(home_j, torch.zeros_like(home_j), env_ids=ids0)
+        env.sim.forward()
+        # Calling the real term updates the latch as a side effect (as in training).
+        cfgL.func(env, **cfgL.params)
+        latched = state["ever_reached_home"][0].item()
+        active = 0.0 if latched else 1.0
+        applied = raw_pen * cfgL.weight * active
+        hc.add_row([label, f"{h:.2f}", "yes" if latched else "no",
+                    "OFF" if latched else "ON", f"{applied:+.3f}"])
+    print(hc)
+    print(
+        f"raw penalty for a {ref_force:.0f} N push = {cfgL.weight * raw_pen:+.3f}/step.\n"
+        f"DESIGN (per your spec): penalty ACTIVE through push-off/rise; LATCHES OFF the moment the\n"
+        f"pelvis first reaches {latch_h:.2f} m and STAYS off for the rest of the episode — so the\n"
+        "fall in steps 4-5 costs NOTHING. The latch resets only on the next episode.\n"
+        "(Note: at the crossing step 3 the latch is already set, so that step reads OFF too.)"
+    )
+
+
+def new_rewards_focus(env: ManagerBasedRlEnv) -> None:
+    """Focused numerical readout of the NEW / reshaped reward terms.
+
+    Three reference states (env 0), all evaluated by calling the term funcs directly
+    with their REAL params + weight (exactly what training uses):
+
+      * HOME(perfect)   — HOME joints, pelvis 0.75 m, upright, zero vel -> standing MAX.
+      * standing(bad)   — HOME height + upright but posture violated / feet toed-out /
+                          leaned forward -> what a sloppy but still-standing pose scores.
+      * fallen          — pelvis dropped to 0.30 m -> the standing gate closes, post/style
+                          standing terms -> ~0 (their MIN). This is "when it falls down".
+
+    Then two GRADIENT SWEEPS prove the fixes give a smooth, non-saturating signal:
+      * post_standing_posture vs uniform per-joint error (rad) — must decay smoothly,
+        NOT collapse to 0 by 0.2 rad the way the un-normalized version did.
+      * com_over_support vs base pitch (rad) — the CoM proxy walks off the foot polygon
+        as the trunk leans, so the reward decays smoothly toward 0.
+    """
+    rm = env.reward_manager
+    asset, names, home_j, home_root = _home_base(env)
+    ids0 = torch.tensor([0])
+
+    def eval_state(root: torch.Tensor, jvec: torch.Tensor) -> dict[str, float]:
+        asset.write_root_link_pose_to_sim(root, env_ids=ids0)
+        asset.write_root_link_velocity_to_sim(torch.zeros(1, 6), env_ids=ids0)
+        asset.write_joint_state_to_sim(jvec, torch.zeros_like(jvec), env_ids=ids0)
+        env.sim.forward()
+        return _weighted_vec_env0(env)
+
+    # --- Three reference states -----------------------------------------------------
+    home_vec = eval_state(home_root, home_j)
+
+    bad_j = _set_joints(
+        home_j, names,
+        {"waist_pitch_joint": 0.35, "waist_roll_joint": 0.25,  # trunk tilted
+         "hip_yaw": 0.4},                                       # feet toed-out
+    )
+    bad_root = home_root.clone()
+    bad_root[0, 3:7] = torch.tensor(_pitch_quat(0.20))  # ~11.5° lean -> CoM walks fwd
+    bad_vec = eval_state(bad_root, bad_j)
+
+    fallen_root = home_root.clone()
+    fallen_root[0, 2] = 0.30  # pelvis on the way to the floor -> standing gate closes
+    fallen_vec = eval_state(fallen_root, home_j)
+
+    tbl = PrettyTable()
+    tbl.field_names = ["reward term", "weight", "HOME(perfect)", "standing(bad)", "fallen"]
+    tbl.align = "r"
+    tbl.align["reward term"] = "l"
+    for name in NEW_TERMS:
+        cfg = rm.get_term_cfg(name)
+        tbl.add_row([
+            name, f"{cfg.weight:g}",
+            f"{home_vec.get(name, float('nan')):+.3f}",
+            f"{bad_vec.get(name, float('nan')):+.3f}",
+            f"{fallen_vec.get(name, float('nan')):+.3f}",
+        ])
+    print("\n=== NEW / RESHAPED REWARDS — focused readout (weighted, env 0) ===")
+    print(tbl)
+    print(
+        "HOME(perfect) = best each term fires while standing at HOME.\n"
+        "standing(bad) = still standing but trunk leaned + feet toed-out (realistic sloppy stand).\n"
+        "fallen        = pelvis at 0.30 m: the standing gate closes so post/style terms -> ~0.\n"
+        "hand-contact terms read ~0 in all three (no floor contact here); the height gate means\n"
+        "  they can only fire with hands ON the floor WHILE standing — verified separately below."
+    )
+
+    # --- Sweep 1: post_standing_posture vs uniform per-joint error ------------------
+    sw = PrettyTable()
+    sw.field_names = ["per-joint err (rad)", "post_standing_posture (weighted)", "raw (÷weight)"]
+    sw.align = "r"
+    w_post = rm.get_term_cfg("post_standing_posture").weight
+    for e in (0.0, 0.1, 0.2, 0.3, 0.5, 0.8, 1.2):
+        err_j = home_j + e  # uniform offset on every joint
+        vec = eval_state(home_root, err_j)
+        wv = vec.get("post_standing_posture", float("nan"))
+        raw = wv / w_post if w_post else float("nan")
+        sw.add_row([f"{e:.1f}", f"{wv:+.3f}", f"{raw:.4f}"])
+    print("\n=== SWEEP — post_standing_posture vs uniform per-joint error ===")
+    print(sw)
+    print(
+        "Must DECAY SMOOTHLY (raw ~0.96 @0.1, ~0.70 @0.3, ~0.08 @0.8). The OLD un-normalized\n"
+        "version collapsed to ~0.02 by 0.2 rad and was dead by 0.3 — logged 0.0000 all last run."
+    )
+
+    # --- com_over_support note: needs REAL foot contact, not a static teleport -------
+    print("\n=== com_over_support — uses TRUE whole-body CoM + a foot-contact gate ===")
+    print(
+        "com_over_support now uses the mujoco subtree_com (true whole-body CoM, which CAPTURES\n"
+        "arm position — ~2.6 cm forward of the pelvis at HOME and more as the arms move) and a\n"
+        "hard ANY-FOOT-CONTACT gate. A static teleport does not populate the contact sensor, so\n"
+        "it reads 0 here — that is EXPECTED. See its real firing in the physics rollout:\n"
+        "  python scripts/diag_rewards.py --from-home 60   (expect com_over_support max ~3.0)."
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -787,13 +1045,29 @@ def main() -> None:
              "from the top of the trajectory down. min/step = worst during fall; "
              "max/step = best while still upright.",
     )
+    parser.add_argument(
+        "--new", action="store_true",
+        help="Run ONLY the focused readout of the NEW / reshaped reward terms "
+             "(post_standing_posture, com_over_support, style_waist_upright, post_feet_yaw, "
+             "hand-contact): HOME vs standing(bad) vs fallen, plus gradient sweeps.",
+    )
+    parser.add_argument(
+        "--activation", action="store_true",
+        help="Run ONLY the ACTIVATION AUDIT: sweep pelvis height from floor to standing and "
+             "show WHERE each reward term switches on/off (gate curves + per-term sweep + a "
+             "hand-contact-on-floor probe answering 'is the penalty active on the ground?').",
+    )
     args = parser.parse_args()
 
     cfg = unitree_g1_getup_env_cfg()
     cfg.scene.num_envs = len(POSES)
     env = ManagerBasedRlEnv(cfg=cfg, device="cpu", render_mode=None)
 
-    if args.ranges:
+    if args.activation:
+        activation_audit(env)
+    elif args.new:
+        new_rewards_focus(env)
+    elif args.ranges:
         firing_range_scan(env)
     elif args.from_home > 0:
         standing_fall_timeseries(env, args.from_home)
@@ -803,6 +1077,7 @@ def main() -> None:
         home_pose_positions(env)
         all_terms_table(env)
         firing_range_scan(env)
+        new_rewards_focus(env)
         style_violation_check(env)
         ankle_parallel_verification(env)
 

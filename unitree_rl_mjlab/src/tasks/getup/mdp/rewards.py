@@ -287,8 +287,10 @@ def hand_contact_penalty(
     free_force: float = 8.0,
     force_scale: float = 10.0,
     ramp_steps: int = 0,
+    latch_height: float = 0.72,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Exponential penalty for hand-to-terrain contact force [B,].
+    """Exponential penalty for hand-to-terrain contact force [B,], LATCHED off at HOME.
 
     Dead zone: force_norm <= free_force (hand's own weight ~7.65 N) → 0 penalty.
     Above that: exp(excess / force_scale) - 1, growing exponentially.
@@ -296,10 +298,25 @@ def hand_contact_penalty(
     preserving the exponential shape in the relevant range (default: 8–58 N).
     Use with a small negative weight (e.g. -0.1); at the 5× clamp the raw
     output is exp(5)-1 ≈ 147, giving a max step penalty of ~14.7 at weight=-0.1.
+
+    Activation policy (per user): the penalty is ACTIVE during the whole push-off /
+    rise (so the policy is discouraged from leaning on its hands, as in the previous
+    training), and LATCHES OFF for the rest of the episode the moment the pelvis first
+    reaches `latch_height` (~0.72 m, HOME). Once the stand is achieved a subsequent
+    fall does NOT re-arm the penalty, so a failed episode is not buried under a huge
+    hand-contact penalty. The latch (`ever_reached_home`) lives in the shared episode
+    state and is cleared on episode reset.
     """
+    asset: Entity = env.scene[asset_cfg.name]
     _, force_norm = _contact_force_norm(env, sensor_name)
     excess = torch.clamp(force_norm - free_force, min=0.0, max=5.0 * force_scale)
-    return (torch.exp(excess / force_scale) - 1.0) * _reset_ramp(env, ramp_steps)
+    penalty = (torch.exp(excess / force_scale) - 1.0) * _reset_ramp(env, ramp_steps)
+    # Latch: once the pelvis reaches HOME height this episode, disable the penalty.
+    state = get_episode_state(env, asset)
+    pelvis_h = asset.data.root_link_pos_w[:, 2]
+    state["ever_reached_home"] = state["ever_reached_home"] | (pelvis_h >= latch_height)
+    active = (~state["ever_reached_home"]).float()
+    return penalty * active
 
 
 def _standing_gate(
@@ -361,10 +378,15 @@ def standing_posture(
         cache = {"tgt": tgt, "w": w}
         setattr(env, _POSTURE_CACHE_ATTR, cache)
     err = asset.data.joint_pos - cache["tgt"]  # [B, J]
-    metric = torch.sum(cache["w"] * err.pow(2), dim=1)  # [B], weighted L2
+    metric = torch.sum(cache["w"] * err.pow(2), dim=1)  # [B], weighted L2 (SUM)
+    # Normalize by the total weight so the exponent is the MEAN per-joint weighted
+    # squared error, not a sum that grows with the joint count. Without this, with
+    # sum_w~49 across 29 joints even a modest 0.2 rad/joint error gives metric~2.0 ->
+    # exp(-kp*2.0) saturates to ~0 and the reward is dead for the entire run.
+    n_w = cache["w"].sum().clamp(min=1.0)  # scalar total weight (~49.0)
     pelvis_height = asset.data.root_link_pos_w[:, 2]  # [B]
     gate = _standing_gate(pelvis_height, pelvis_height_threshold, band=band)
-    return torch.exp(-kp * metric) * gate  # positive reward in [0, 1] * gate
+    return torch.exp(-kp * (metric / n_w)) * gate  # positive reward in [0, 1] * gate
 
 
 def feet_slip(
@@ -858,6 +880,36 @@ def joint_group_deviation(
     return pen * gate
 
 
+def waist_upright_reward(
+    env: ManagerBasedRlEnv,
+    v_free: float = 0.10,
+    margin: float = 0.40,
+    value_at_margin: float = 0.1,
+    gate_lo: float | None = None,
+    gate_hi: float | None = None,
+    band: float = 0.08,
+    require_upright: bool = False,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """POSITIVE dead-zone reward for keeping the trunk upright [B,].
+
+    Positive counterpart of joint_group_deviation for the waist: instead of only
+    PENALISING deviation outside a band (which gives no pull toward neutral once
+    inside), this REWARDS the waist staying near neutral and decays smoothly as it
+    tilts. dev = ‖(q_pitch, q_roll)‖; f_tol(dev, 0, v_free, margin) is 1.0 while the
+    trunk is within `v_free` rad of straight and decays to `value_at_margin` at
+    `v_free + margin`. Same stage/upright gating as the old penalty. Use POSITIVE weight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    q = asset.data.joint_pos[:, asset_cfg.joint_ids]  # [B, n_waist]
+    dev = torch.norm(q, dim=1)  # [B], deviation from neutral (0)
+    reward = f_tol(dev, 0.0, v_free, margin, value_at_margin)
+    gate = _stage_gate(asset.data.root_link_pos_w[:, 2], lo=gate_lo, hi=gate_hi, band=band)
+    if require_upright:
+        gate = gate * torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)
+    return reward * gate
+
+
 # --- Leg / foot orientation (group C) --------------------------------------
 
 def shank_orientation(
@@ -1174,14 +1226,16 @@ def style_foot_displacement(
     env: ManagerBasedRlEnv,
     scale: float = 2.0,
     clip_min: float = 0.3,
+    height_threshold: float = H_STAGE2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """HoST CoM-in-support: Σ_feet exp(-2·clamp(||base_xy-foot_xy||², 0.3)) · 1(h>H_STAGE2) [B,].
+    """HoST CoM-in-support: Σ_feet exp(-2·clamp(||base_xy-foot_xy||², 0.3)) · gate(h) [B,].
 
     Summed over both feet; configure weight 2.5 (per-foot). The clamp(.,0.3) floors
     the squared distance, so the reward saturates (~0.55/foot) when the base is well
-    centered and only drops once a foot is displaced beyond ~0.3 m. Only active after
-    Stage 2. asset_cfg.site_names = (left_foot, right_foot).
+    centered and only drops once a foot is displaced beyond ~0.3 m. Active above
+    `height_threshold` (default H_STAGE2; lower it to reward feet-under-CoM earlier in
+    the rise). asset_cfg.site_names = (left_foot, right_foot).
     """
     asset: Entity = env.scene[asset_cfg.name]
     base_xy = asset.data.root_link_pos_w[:, :2].unsqueeze(1)  # [B, 1, 2]
@@ -1189,10 +1243,10 @@ def style_foot_displacement(
     d2 = ((foot_xy - base_xy).pow(2)).sum(dim=-1)  # [B, F]
     d2 = torch.clamp(d2, min=clip_min)
     r = torch.exp(-scale * d2).sum(dim=1)  # [B]
-    # Ramped gate (was a hard step at H_STAGE2): this term was part of the F1
-    # reward cliff — several standing rewards all switching on discontinuously at
-    # 0.65 m. Same band as _post_gate so all standing payoffs fade in together.
-    gate = _standing_gate(asset.data.root_link_pos_w[:, 2], H_STAGE2, band=0.08)
+    # Ramped gate (was a hard step): this term was part of the F1 reward cliff —
+    # several standing rewards all switching on discontinuously at 0.65 m. Same band
+    # as _post_gate so all standing payoffs fade in together.
+    gate = _standing_gate(asset.data.root_link_pos_w[:, 2], height_threshold, band=0.08)
     return r * gate
 
 

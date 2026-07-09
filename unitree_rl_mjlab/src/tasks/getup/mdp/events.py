@@ -632,6 +632,10 @@ def get_episode_state(env: "ManagerBasedRlEnv", asset: "Entity") -> dict:
         "standing_counter": torch.zeros(n, device=device, dtype=torch.long),
         # True once the robot has been above the standing threshold in this episode.
         "ever_stood": torch.zeros(n, device=device, dtype=torch.bool),
+        # True once the pelvis has reached the HOME height (~0.72 m) in this episode.
+        # Latches the hand-contact penalty OFF for the rest of the episode so a later
+        # fall does not dump a huge contact penalty on an already-successful stand.
+        "ever_reached_home": torch.zeros(n, device=device, dtype=torch.bool),
         # Consecutive steps below the threshold after ever_stood became True.
         "fall_counter": torch.zeros(n, device=device, dtype=torch.long),
         # Best pelvis height reached this episode (for the no-progress stall timeout).
@@ -663,6 +667,7 @@ def reset_episode_state(
     state["prev_pg_x"][env_ids] = asset.data.projected_gravity_b[env_ids, 0]
     state["standing_counter"][env_ids] = 0
     state["ever_stood"][env_ids] = False
+    state["ever_reached_home"][env_ids] = False
     state["fall_counter"][env_ids] = 0
     state["best_height"][env_ids] = asset.data.root_link_pos_w[env_ids, 2]
     state["stall_counter"][env_ids] = 0

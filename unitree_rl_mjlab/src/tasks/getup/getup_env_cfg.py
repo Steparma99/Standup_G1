@@ -716,13 +716,17 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"limit": 1.4, "penalty": -10.0,
                     "asset_cfg": SceneEntityCfg("robot", joint_names=("waist_yaw_joint",))},
         ),
-        # Keep the trunk straight once rising past ~0.5 m (gate_lo=0.5). Soft band penalty
-        # on waist pitch+roll; gated so it does NOT block the curl/flexion early in the
-        # rise, only straightens the torso as the robot approaches standing.
+        # Incentivize trunk uprightness THROUGH the rise (gate_lo lowered 0.65 -> 0.45 =
+        # H_STAGE1) instead of only once standing, so the robot keeps straightening out of
+        # the crouch rather than farming crouch rewards. POSITIVE dead-zone reward (was a
+        # -12.0 penalty): v_free=0.1 rad full reward, decays to 0.1 at ~0.5 rad tilt.
+        # SAFE to activate early because require_upright=True multiplies by uprightness:
+        # while the trunk is still horizontal in the Stage-0 curl the payout is ~0, and it
+        # grows only as the trunk actually comes vertical — it never rewards a flat trunk.
         "style_waist_upright": RewardTermCfg(
-            func=mdp.joint_group_deviation,
-            weight=-12.0,  # was -8.0 — stronger upright enforcement once standing
-            params={"lower": -0.25, "upper": 0.25, "gate_lo": 0.65, "band": 0.08,
+            func=mdp.waist_upright_reward,
+            weight=8.0,  # POSITIVE (was -12.0 penalty)
+            params={"v_free": 0.10, "margin": 0.40, "gate_lo": 0.45, "band": 0.08,
                     "require_upright": True,
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
@@ -750,7 +754,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "style_foot_displacement": RewardTermCfg(
             func=mdp.style_foot_displacement,
             weight=4.0,  # was 2.5 — keep feet under pelvis (CoM support)
-            params={"scale": 2.0, "clip_min": 0.0,
+            # height_threshold lowered 0.65 -> 0.45 (H_STAGE1): reward feet-under-CoM
+            # THROUGH the rise so the robot sets up a balanced base earlier, supporting
+            # the earlier trunk-uprightness incentive.
+            params={"scale": 2.0, "clip_min": 0.0, "height_threshold": 0.45,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},  # Set per-robot.
         ),
         "style_foot_distance": RewardTermCfg(
@@ -813,17 +820,24 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # where a hand push-up may help. Halved so it still discourages hard hand
         # contact without dominating the (otherwise height-gated) style group.
         # Tune force_scale vs. contact/hand_*_force_max metrics once training starts.
+        # latch_height=0.72: penalty is ACTIVE all through the push-off/rise (discourage
+        # hand-crutch reliance, as in the previous training) and LATCHES OFF for the rest
+        # of the episode once the pelvis first reaches HOME (~0.72 m). A later fall does
+        # NOT re-arm it, so a failed episode is never buried under a huge hand-contact
+        # penalty (the noise that dominated late in prior runs).
         "style_hand_left_contact": RewardTermCfg(
             func=mdp.hand_contact_penalty,
             weight=-0.05,  # was -0.1
             params={"sensor_name": "contact_hand_left",
-                    "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS},
+                    "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS,
+                    "latch_height": 0.72, "asset_cfg": SceneEntityCfg("robot")},
         ),
         "style_hand_right_contact": RewardTermCfg(
             func=mdp.hand_contact_penalty,
             weight=-0.05,  # was -0.1
             params={"sensor_name": "contact_hand_right",
-                    "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS},
+                    "free_force": 8.0, "force_scale": 10.0, "ramp_steps": _GRACE_STEPS,
+                    "latch_height": 0.72, "asset_cfg": SceneEntityCfg("robot")},
         ),
         # ===================================================================
         # REGULARIZATION group (HoST definitive), group weight 0.1: weak shaping
@@ -983,10 +997,14 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # with distance from HOME, actively repelling the robot from the standing basin the
         # moment its posture was imperfect — exactly when the assist force was withdrawn).
         # Same target_joint_pos / joint_weights dicts (set per-robot in env_cfgs.py).
+        # kp=4.0 tuned for the NORMALIZED metric (mean per-joint weighted sq error):
+        # mean 0.1 rad -> 0.96, 0.3 rad -> 0.70, 0.8 rad -> 0.08 — smooth gradient
+        # across the full operating range. Before normalization the exp saturated to
+        # ~0 for any realistic pose (logged 0.0000 the entire previous run).
         "post_standing_posture": RewardTermCfg(
             func=mdp.standing_posture, weight=5.0,
             params={"target_joint_pos": {}, "joint_weights": {},
-                    "pelvis_height_threshold": 0.65,
+                    "pelvis_height_threshold": 0.65, "kp": 4.0,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Both-feet grounded reward: 0.5 for one foot, 1.0 for both. Directly penalizes
@@ -1003,10 +1021,26 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.post_feet_parallel, weight=2.5,
             params={"scale": 20.0, "clip_min": 0.001, "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Feet yaw alignment: exp(-10·(q_yawL²+q_yawR²)); peak when both hip_yaw=0 (toes fwd).
+        # Feet yaw alignment: exp(-2·(q_yawL²+q_yawR²)); peak when both hip_yaw=0 (toes fwd).
+        # scale lowered 10 -> 2.0: at 10 a duck stance (hip_yaw ±0.4 rad) gave
+        # exp(-10·2·0.16)=0.04 ≈ saturated (logged ~0.005 all run, no gradient to
+        # straighten feet). At 2.0 the same stance gives 0.53 — real gradient.
         "post_feet_yaw": RewardTermCfg(
             func=mdp.post_feet_yaw, weight=2.5,
-            params={"scale": 10.0, "asset_cfg": SceneEntityCfg("robot")},
+            params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # CoM-over-support-polygon: exp(-dist_scale·d²) between the TRUE whole-body CoM
+        # (mujoco subtree_com — captures ARM position, ~2.6 cm forward of pelvis at HOME
+        # and shifts further as the arms move) and the foot-midpoint. DIRECT geometric
+        # balance signal — targets the root cause of the collapse (CoM behind the feet
+        # because arms never reposition), which a pelvis-only proxy cannot see. Three
+        # gates: height (ramp 0.25->0.40 m), uprightness (proj_grav -0.3..-0.7), and
+        # ANY-foot-contact (support polygon undefined without a planted foot).
+        # site_names + feets sensor set per-robot in env_cfgs.py.
+        "com_over_support": RewardTermCfg(
+            func=mdp.com_over_support, weight=3.0,
+            params={"foot_sensor_name": "feet_ground_contact", "dist_scale": 5.0,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
         # Explicit bonus for holding the stand (not just touching it for a frame).
         # Also the only writer of episode_state["ever_stood"]/["standing_counter"],
