@@ -9,12 +9,23 @@
 #   bash launch.sh Unitree-G1-GetUp
 #   bash launch.sh Unitree-G1-GetUp getup_v2
 #   bash launch.sh Unitree-G1-GetUp getup_v2 --agent.max-iterations=5000
+#
+# Video automatici (auto_video.sh viene lanciato in parallelo, ON di default):
+#   ogni --video-interval iterazioni (default 500) renderizza il checkpoint con
+#   la STESSA forza di assistenza del training (force-matched) e beta=1.0, e
+#   salva in logs/rsl_rl/g1_getup/<run>/videos/auto/model_<N>.mp4.
+#   Flag (consumati da launch.sh, NON passati a train.py):
+#     --no-video            disabilita i video automatici
+#     --video-interval N    intervallo iterazioni (default 500)
+#     --video-device D      device per il render, es. cpu / cuda:1
 # ============================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/unitree_rl_mjlab/logs"
 PID_FILE="$SCRIPT_DIR/.training.pid"
+VIDEO_PID_FILE="$SCRIPT_DIR/.autovideo.pid"
+TASK_LOGROOT="$SCRIPT_DIR/unitree_rl_mjlab/logs/rsl_rl/g1_getup"
 
 if [ $# -lt 1 ]; then
     echo "Uso: bash launch.sh <task> [run_name] [extra args...]"
@@ -33,7 +44,19 @@ else
     shift || true  # consuma run_name solo se non inizia con --
 fi
 
-EXTRA_ARGS=("$@")
+# Separa i flag video (consumati qui) dagli extra args per train.py.
+AUTO_VIDEO=1
+VIDEO_INTERVAL=500
+VIDEO_DEVICE=""
+EXTRA_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-video) AUTO_VIDEO=0; shift;;
+        --video-interval) VIDEO_INTERVAL="$2"; shift 2;;
+        --video-device) VIDEO_DEVICE="$2"; shift 2;;
+        *) EXTRA_ARGS+=("$1"); shift;;
+    esac
+done
 LOG_FILE="$LOG_DIR/train_${RUN_NAME}.log"
 
 mkdir -p "$LOG_DIR"
@@ -80,4 +103,47 @@ else
     cat "$LOG_FILE"
     rm -f "$PID_FILE"
     exit 1
+fi
+
+# ------------------------------------------------------------
+# Video automatici: lancia auto_video.sh in parallelo al training.
+# Aspetta che train.py crei la run dir (2026-..._<RUN_NAME>), poi avvia il
+# watcher che renderizza ogni VIDEO_INTERVAL iterazioni con la stessa forza
+# di assistenza del training (force-matched) e beta=1.0.
+# ------------------------------------------------------------
+if [ "$AUTO_VIDEO" -eq 1 ]; then
+    # Se c'è un watcher residuo di una run precedente, terminalo.
+    if [ -f "$VIDEO_PID_FILE" ]; then
+        OLD_VPID=$(cat "$VIDEO_PID_FILE")
+        if kill -0 "$OLD_VPID" 2>/dev/null; then
+            echo "[INFO] Termino auto_video precedente (PID $OLD_VPID)"
+            kill "$OLD_VPID" 2>/dev/null || true
+        fi
+        rm -f "$VIDEO_PID_FILE"
+    fi
+    VIDEO_LOG="$LOG_DIR/videos_${RUN_NAME}.log"
+    DEV_ARGS=()
+    [ -n "$VIDEO_DEVICE" ] && DEV_ARGS=(--device "$VIDEO_DEVICE")
+    nohup bash -c "
+        # Aspetta (max 15 min) che la run dir del training compaia.
+        for i in \$(seq 1 180); do
+            d=\$(ls -1dt '$TASK_LOGROOT'/*'$RUN_NAME'*/ 2>/dev/null | head -1)
+            [ -n \"\$d\" ] && break
+            sleep 5
+        done
+        if [ -z \"\$d\" ]; then
+            echo '[auto_video-launcher] run dir mai apparsa, esco.'
+            exit 1
+        fi
+        echo \"[auto_video-launcher] run dir trovata: \$d\"
+        exec bash '$SCRIPT_DIR/unitree_rl_mjlab/scripts/auto_video.sh' '$RUN_NAME' \
+            --interval '$VIDEO_INTERVAL' ${DEV_ARGS[*]:-}
+    " > "$VIDEO_LOG" 2>&1 &
+    VIDEO_PID=$!
+    echo "$VIDEO_PID" > "$VIDEO_PID_FILE"
+    echo "[OK] Video automatici attivi (PID $VIDEO_PID) — ogni $VIDEO_INTERVAL iter, force-matched"
+    echo "     Log video:  tail -f $VIDEO_LOG"
+    echo "     Output:     <run_dir>/videos/auto/model_<N>.mp4"
+else
+    echo "[--] Video automatici disabilitati (--no-video)"
 fi

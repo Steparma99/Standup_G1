@@ -6,6 +6,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$SCRIPT_DIR/.training.pid"
+VIDEO_PID_FILE="$SCRIPT_DIR/.autovideo.pid"
 
 echo "========================================"
 echo "  KILL TRAINING"
@@ -57,6 +58,30 @@ if [ -z "$FINAL" ]; then
     echo "[OK] Training terminato con successo"
 else
     echo "[ERRORE] Non riesco a killare: $FINAL"
+fi
+
+# ------------------------------------------------------------
+# Killa anche il watcher dei video automatici (auto_video.sh)
+# ------------------------------------------------------------
+if [ -f "$VIDEO_PID_FILE" ]; then
+    VPID=$(cat "$VIDEO_PID_FILE")
+    if kill -0 "$VPID" 2>/dev/null; then
+        echo "[INFO] Termino auto_video (PID $VPID)..."
+        VPGID=$(ps -o pgid= -p "$VPID" 2>/dev/null | tr -d ' ' || echo "")
+        if [ -n "$VPGID" ] && [ "$VPGID" != "0" ]; then
+            kill -- -"$VPGID" 2>/dev/null || true
+        fi
+        kill "$VPID" 2>/dev/null || true
+    fi
+    rm -f "$VIDEO_PID_FILE"
+fi
+pkill -f "scripts/auto_video.sh" 2>/dev/null || true
+V_ALIVE=$(pgrep -f "scripts/auto_video.sh" 2>/dev/null || true)
+if [ -z "$V_ALIVE" ]; then
+    echo "[OK] Auto-video terminato"
+else
+    echo "[WARN] auto_video ancora vivo: $V_ALIVE (SIGKILL...)"
+    pkill -9 -f "scripts/auto_video.sh" 2>/dev/null || true
 fi
 
 echo "========================================"

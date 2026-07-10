@@ -25,6 +25,16 @@ bash launch.sh Unitree-G1-GetUp "insert run name" \
   # --env.scene.num-envs overrides the yaml default
   # --agent.max-iterations overrides the default (12000)
 
+  # VIDEO AUTOMATICI (ON di default): launch.sh lancia anche auto_video.sh in
+  # parallelo — ogni 500 iter renderizza il checkpoint con la STESSA forza di
+  # assistenza del training (force-matched, via GETUP_EVAL_ASSIST_FORCE) e
+  # beta=1.0, salvando in <run_dir>/videos/auto/model_<N>.mp4.
+  # --no-video            → disabilita
+  # --video-interval N    → cambia intervallo (default 500)
+  # --video-device cpu    → render su CPU (zero contesa GPU, più lento)
+  # Log video: tail -f unitree_rl_mjlab/logs/videos_<run_name>.log
+  # bash kill.sh termina training E video watcher.
+
 Other options:
 
 bash launch.sh Unitree-G1-GetUp "insert run name" \

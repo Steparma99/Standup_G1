@@ -888,7 +888,8 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # (arm velocity shaping) only AFTER the robot reliably stands.
         "reg_arm_vel": RewardTermCfg(
             func=mdp.arm_vel_soft_limit,
-            weight=0,  # was -0.3 — disabled for Phase 1 standup learning
+            weight=-0.1,  # re-enabled mild (was 0): settle arms at HOME after standup;
+            # soft limits stay high (12/12/8 rad/s) so the standup swing is still free
             params={
                 "vel_limits": {
                     ".*_shoulder_.*": 12.0,  # was 8.0 — allow normal standup swing
@@ -984,8 +985,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # leg-dominated post_standing_posture so the arm gradient is not drowned out by the
         # high-weight leg terms in that normalised 29-DOF metric.
         "post_upper_body_posture": RewardTermCfg(
-            func=mdp.post_upper_body_posture, weight=2.0,
-            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.5,
+            func=mdp.post_upper_body_posture, weight=4.0,  # 2.0->4.0: real weight vs feet/style terms (8, 7+)
+            # scale 0.5->0.2: exp(-0.5*err) saturates to ~0 when arms are flung far back
+            # (err~6 -> 0.05, dead gradient exactly when correction is needed). 0.2 keeps
+            # a live gradient from far (err~6 -> 0.30) so arms are pulled in toward HOME.
+            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.2,
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
