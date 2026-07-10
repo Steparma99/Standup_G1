@@ -354,6 +354,10 @@ class AssistanceCurriculum:
         # monotonic ratchet into a servo that tracks each env's true competence.
         self._ramp_up_after = int(p.get("ramp_up_after_failures", 20))
         self._ramp_up_step = float(p.get("ramp_up_step_n", 5.0))
+        # Rate limiter: after an env decays its assist, it must wait this many
+        # episodes before another decay is allowed. This breaks the positive
+        # feedback loop where higher success density speeds up global annealing.
+        self._decay_cooldown = int(p.get("decay_cooldown_episodes", 0))
 
         # Feet-planted qualifier for the decay credit. Only pelvis height reached
         # while BOTH feet are genuinely planted (in ground contact AND not
@@ -383,6 +387,11 @@ class AssistanceCurriculum:
         # Consecutive FAILED episodes (no stable hold) since the last hold / bump
         # (Fix 2: drives the support re-ramp).
         self._fail_streak = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
+        )
+        # Per-env remaining cooldown episodes before assist is allowed to decay again.
+        # This persists across resets by design; reset() decrements it once per episode.
+        self._decay_cooldown_counter = torch.zeros(
             self._num_envs, device=self._device, dtype=torch.long
         )
         # Reusable zero wrench buffer (N, 1 body, 3).
@@ -422,13 +431,22 @@ class AssistanceCurriculum:
         if env_ids is None:
             env_ids = torch.arange(self._num_envs, device=self._device)
         held = self._stable_held[env_ids]
+        cooldown = self._decay_cooldown_counter[env_ids]
+        can_decay = cooldown == 0
+        decayed = held & can_decay
         # Fix 1 — decay only on a genuine held stand (binary credit). Support is
         # never retired on a one-frame height touch that immediately topples, so
         # the crutch can no longer outrun real competence (the failure that
         # cratered the previous run's force to ~0 while stable_hold stayed ~0).
         self._force[env_ids] = torch.where(
-            held, self._force[env_ids] - self._decay, self._force[env_ids]
+            decayed, self._force[env_ids] - self._decay, self._force[env_ids]
         )
+        cooldown = torch.where(
+            decayed,
+            torch.full_like(cooldown, self._decay_cooldown),
+            torch.clamp(cooldown - 1, min=0),
+        )
+        self._decay_cooldown_counter[env_ids] = cooldown
         # Fix 2 — reversible crutch. Track consecutive failed episodes; after
         # ramp_up_after of them, bump the support back up so a regressed env
         # recovers instead of sitting at the zero floor forever. The streak

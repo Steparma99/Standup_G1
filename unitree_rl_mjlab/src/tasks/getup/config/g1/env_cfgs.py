@@ -64,12 +64,16 @@ _ASSIST_SUCCESS_HEIGHT         = 0.65    # pelvis height counting as "stood" (ta
 # steps). Matches the stable_hold success metric (n_hold=50). Replaces the old
 # partial-credit-on-peak-height gate that decayed the lift on one-frame touches.
 _ASSIST_HOLD_STEPS             = 50
+# Rate limiter: after an env retires 2 N of assist, it must wait this many
+# full episodes before it is allowed to decay again. This caps the aggregate
+# force-removal rate even when many envs are simultaneously succeeding.
+_ASSIST_DECAY_COOLDOWN_EPISODES = 3
 # Fix 2 — reversible crutch: after this many consecutive FAILED episodes (no held
 # stand) an env's support is bumped back up by _ASSIST_RAMP_UP_STEP_N (clamped to
 # the initial force), so a regressed env recovers instead of sitting at 0 forever.
-_ASSIST_RAMP_UP_AFTER_FAILURES = 10      # was 20 — recover support faster so the
+_ASSIST_RAMP_UP_AFTER_FAILURES = 8       # was 20 — recover support faster so the
                                          # servo tracks true competence, not a ratchet
-_ASSIST_RAMP_UP_STEP_N         = 5.0
+_ASSIST_RAMP_UP_STEP_N         = 10.0
 _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated/settle
                                          # window (HoST gates pull_force by
                                          # real_episode_length_buf > unactuated_time=30,
@@ -84,7 +88,7 @@ _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated
 # SAME mechanism as the vertical assist force — so it is invariant to env count /
 # episode length. The policy observes its beta (beta_rescaler obs term).
 # ---------------------------------------------------------------------------
-_BETA_CURRICULUM_ENABLE   = True
+_BETA_CURRICULUM_ENABLE   = False
 _BETA_INITIAL             = 1.0
 _BETA_DECREMENT           = 0.01   # was 0.02 — pace authority withdrawal with the
                                    # slower assist-force decay (avoid crutch-dependence)
@@ -142,7 +146,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # (~4 constraint rows per contact, pyramidal cone). Watch the run for overflow
     # warnings: lower if memory-bound, raise further if they appear.
     cfg.sim.nconmax = 80
-    cfg.sim.njmax = 350
+    cfg.sim.njmax = 380
 
     # Robot spawns from SUPINE by default; the reset event below overrides the
     # pose every episode by sampling from the reference set. Uses the HoST PD
@@ -440,6 +444,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "force_min": _ASSIST_FORCE_MIN,
                 "success_height": _ASSIST_SUCCESS_HEIGHT,
                 "hold_steps": _ASSIST_HOLD_STEPS,
+                "decay_cooldown_episodes": _ASSIST_DECAY_COOLDOWN_EPISODES,
                 "ramp_up_after_failures": _ASSIST_RAMP_UP_AFTER_FAILURES,
                 "ramp_up_step_n": _ASSIST_RAMP_UP_STEP_N,
                 "unactuated_steps": _ASSIST_UNACTUATED_STEPS,
