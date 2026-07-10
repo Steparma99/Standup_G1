@@ -1,5 +1,7 @@
 """Unitree G1 get-up environment configuration."""
 
+import os
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from src.tasks.getup.mdp.actions import (
@@ -403,10 +405,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_ankle_roll_joint": 1.0,
         # Waist — fix crooked torso
         "waist_.*": 2.0,
-        # Arms — stop random movement; HOME sets shoulder_pitch/roll + elbow targets
-        ".*_shoulder_.*": 1.5,
-        ".*_elbow_joint": 1.5,
-        ".*_wrist_.*": 0.5,
+        # Arms — raised 1.5->2.5 / wrists 0.5->1.5 so the arm gradient is not drowned
+        # out by the high-weight legs in this normalised metric (fixes arms trailing
+        # behind the trunk). HOME sets shoulder_pitch/roll + elbow targets.
+        ".*_shoulder_.*": 2.5,
+        ".*_elbow_joint": 2.5,
+        ".*_wrist_.*": 1.5,
     }
 
     # Both-feet grounded: needs the foot site names to check height.
@@ -556,9 +560,28 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.episode_length_s = int(1e9)
         cfg.observations["actor"].enable_corruption = False
         cfg.events.pop("push_robot", None)
-        # No support force at eval time: show the true, unaided policy.
-        cfg.events.pop("assistance_curriculum", None)
-        cfg.metrics.pop("curriculum/assistance_force", None)
+        # Assist force at eval time.
+        #  - Default (env var unset): pop the curriculum → 0 N, the true unaided policy
+        #    (deployment target).
+        #  - GETUP_EVAL_ASSIST_FORCE=<N>: PIN a constant N-Newton lift so the video
+        #    reproduces the exact training conditions of a given checkpoint (the assist
+        #    the policy actually had at that iteration). Set it to the run's
+        #    curriculum/assistance_force at the checkpoint's iteration to make the video
+        #    match the metrics. Decay/ramp are zeroed so the force stays constant.
+        _eval_force = os.environ.get("GETUP_EVAL_ASSIST_FORCE")
+        _eval_force_f = float(_eval_force) if _eval_force not in (None, "") else 0.0
+        if _eval_force_f > 0.0 and "assistance_curriculum" in cfg.events:
+            _p = cfg.events["assistance_curriculum"].params
+            _p["initial_force_n"] = _eval_force_f
+            _p["force_min"] = _eval_force_f
+            _p["force_decay_per_success"] = 0.0
+            _p["ramp_up_step_n"] = 0.0
+            print(f"[getup] EVAL assist force pinned to {_eval_force_f:.1f} N "
+                  "(video matches training conditions)")
+        else:
+            # No support force at eval time: show the true, unaided policy.
+            cfg.events.pop("assistance_curriculum", None)
+            cfg.metrics.pop("curriculum/assistance_force", None)
         # Pin beta to its converged floor (0.25 — HoST's fixed eval/ablation value)
         # instead of the training start of 1.0: the curriculum is per-env and does
         # not persist into a fresh eval env, so without this the policy would be

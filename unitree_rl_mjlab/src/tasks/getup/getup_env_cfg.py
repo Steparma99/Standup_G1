@@ -977,9 +977,14 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.post_base_height, weight=10.0,
             params={"target_height": 0.75, "scale": 20.0, "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # arm-only posture disabled: full-body HOME tracking is handled by post_standing_posture.
+        # Arm/waist HOME-posture reward, ENABLED (weight 2.0). A dedicated upper-body
+        # signal so the arms return to the HOME pose after standup instead of trailing
+        # behind the trunk (which pushes the whole-body CoM backward and destabilises the
+        # stand — the arms-back behaviour seen in the eval videos). Kept SEPARATE from the
+        # leg-dominated post_standing_posture so the arm gradient is not drowned out by the
+        # high-weight leg terms in that normalised 29-DOF metric.
         "post_upper_body_posture": RewardTermCfg(
-            func=mdp.post_upper_body_posture, weight=0.0,
+            func=mdp.post_upper_body_posture, weight=2.0,
             params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.5,
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
@@ -1032,14 +1037,19 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # CoM-over-support-polygon: exp(-dist_scale·d²) between the TRUE whole-body CoM
         # (mujoco subtree_com — captures ARM position, ~2.6 cm forward of pelvis at HOME
         # and shifts further as the arms move) and the foot-midpoint. DIRECT geometric
-        # balance signal — targets the root cause of the collapse (CoM behind the feet
-        # because arms never reposition), which a pelvis-only proxy cannot see. Three
-        # gates: height (ramp 0.25->0.40 m), uprightness (proj_grav -0.3..-0.7), and
+        # balance signal — targets the arms-back CoM problem (CoM behind the feet because
+        # arms never reposition), which a pelvis-only proxy cannot see. Three gates:
+        # height (ramp 0.25->0.40 m), uprightness (ramp on -proj_grav_z 0.3->0.7, then
+        # FULLY ON at full upright — it does NOT switch off when standing), and
         # ANY-foot-contact (support polygon undefined without a planted foot).
+        # Strengthened for the posture pass: weight 3->5 (balance matters more relative to
+        # the other post-task terms) and dist_scale 5->8 (sharper Gaussian → stronger
+        # gradient pulling the CoM/arms forward over the feet; at 8 a 20 cm backward CoM
+        # offset costs ~27% vs ~18% at 5, so arms-back is disciplined harder).
         # site_names + feets sensor set per-robot in env_cfgs.py.
         "com_over_support": RewardTermCfg(
-            func=mdp.com_over_support, weight=3.0,
-            params={"foot_sensor_name": "feet_ground_contact", "dist_scale": 5.0,
+            func=mdp.com_over_support, weight=5.0,
+            params={"foot_sensor_name": "feet_ground_contact", "dist_scale": 8.0,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
         # Explicit bonus for holding the stand (not just touching it for a frame).
