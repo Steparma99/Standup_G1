@@ -739,7 +739,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         "style_knee_deviation": RewardTermCfg(
             func=mdp.style_knee_deviation,
-            weight=2.0,  # was 1.0 — stronger knee alignment during standing
+            weight=4.0,  # 2.0->4.0: v2_posture run ended with this term at -0.45 (near
+            # floor) and worsening as assist decayed — knees bend to stay stable, which
+            # shifts the CoM and drags the arms off HOME to satisfy com_over_support (5.0).
+            # Must out-price the crouch at the root.
             params={"hi_limit": 2.85, "lo_limit": -0.06, "penalty": -0.25,  # Ground value
                     "asset_cfg": SceneEntityCfg("robot", joint_names=(".*_knee_joint",))},
         ),
@@ -985,7 +988,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # leg-dominated post_standing_posture so the arm gradient is not drowned out by the
         # high-weight leg terms in that normalised 29-DOF metric.
         "post_upper_body_posture": RewardTermCfg(
-            func=mdp.post_upper_body_posture, weight=4.0,  # 2.0->4.0: real weight vs feet/style terms (8, 7+)
+            func=mdp.post_upper_body_posture, weight=6.0,  # 4.0->6.0: v2_posture ended at
+            # only 9% of cap (0.36/4.0) while com_over_support sat at 90% — the arm-HOME
+            # gradient was losing the trade against CoM compensation. Now outweighs
+            # com_over_support (5.0) so settling arms at HOME pays more than parking
+            # them as a counterweight.
             # scale 0.5->0.2: exp(-0.5*err) saturates to ~0 when arms are flung far back
             # (err~6 -> 0.05, dead gradient exactly when correction is needed). 0.2 keeps
             # a live gradient from far (err~6 -> 0.30) so arms are pulled in toward HOME.
@@ -1011,7 +1018,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # across the full operating range. Before normalization the exp saturated to
         # ~0 for any realistic pose (logged 0.0000 the entire previous run).
         "post_standing_posture": RewardTermCfg(
-            func=mdp.standing_posture, weight=5.0,
+            func=mdp.standing_posture, weight=7.5,  # 5.0->7.5: was stuck at 13% of cap
+            # (0.67/5.0) at end of v2_posture while sibling post terms sat at 85-90%;
+            # raise toward the base-height/orientation tier (10.0) so full-body HOME
+            # match is worth collecting once standing is stable.
             params={"target_joint_pos": {}, "joint_weights": {},
                     "pelvis_height_threshold": 0.65, "kp": 4.0,
                     "asset_cfg": SceneEntityCfg("robot")},
