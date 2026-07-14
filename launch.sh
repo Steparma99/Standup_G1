@@ -13,7 +13,7 @@
 # Video automatici (auto_video.sh viene lanciato in parallelo, ON di default):
 #   ogni --video-interval iterazioni (default 500) renderizza il checkpoint con
 #   la STESSA forza di assistenza del training (force-matched) e beta=1.0, e
-#   salva in logs/rsl_rl/g1_getup/<run>/videos/auto/model_<N>.mp4.
+#   salva in logs/rsl_rl/g1_getup/<run>/videos/play/model_<N>_force<F>N_beta<B>.mp4.
 #   Flag (consumati da launch.sh, NON passati a train.py):
 #     --no-video            disabilita i video automatici
 #     --video-interval N    intervallo iterazioni (default 500)
@@ -143,7 +143,7 @@ if [ "$AUTO_VIDEO" -eq 1 ]; then
     echo "$VIDEO_PID" > "$VIDEO_PID_FILE"
     echo "[OK] Video automatici attivi (PID $VIDEO_PID) — ogni $VIDEO_INTERVAL iter, force-matched"
     echo "     Log video:  tail -f $VIDEO_LOG"
-    echo "     Output:     <run_dir>/videos/auto/model_<N>.mp4"
+    echo "     Output:     <run_dir>/videos/play/model_<N>_force<F>N_beta<B>.mp4"
 else
     echo "[--] Video automatici disabilitati (--no-video)"
 fi

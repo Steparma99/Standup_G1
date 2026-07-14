@@ -1597,15 +1597,27 @@ def post_upper_body_posture(
     env: ManagerBasedRlEnv,
     target_joint_pos: dict[str, float],
     joint_weights: dict[str, float],
-    scale: float = 0.1,
+    scale: float = 0.5,
     height_threshold: float = H_STAGE2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Post-task upper-body posture: exp(-0.1·Σ w·(q-q*)²) · 1(h>H_STAGE2) [B,].
+    """Post-task upper-body posture: clamp(1 − scale·mean_w (q−q*)², 0) · gate [B,].
 
-    Softly encourages the default arm/waist standing pose. ``joint_weights`` is a 0/1
-    mask selecting the upper-body joints; ``target_joint_pos`` is the HOME pose. Both
-    are {regex: value} dicts resolved once (cached), set per-robot.
+    Positive reward in [0, 1], maximal (=1) exactly at the HOME pose, decreasing
+    LINEARLY with the weighted mean per-joint squared error. Two properties the old
+    exp(-scale·Σ err²) form lacked:
+
+    - NORMALIZED: the metric is divided by the total joint weight, so it is a mean
+      per-joint error, not a sum growing with the joint count. The unnormalized sum
+      over ~17 joints saturated the exponential to ~0 for any realistic arm error
+      (same bug standing_posture() fixed and documents).
+    - NON-VANISHING GRADIENT: linear in the mean squared error, so the pull toward
+      HOME is constant at any distance until the clamp floor (mean err² = 1/scale,
+      i.e. ~1.4 rad RMS per joint at scale 0.5) instead of dying exponentially
+      exactly when the arms are far off and the signal is needed most.
+
+    ``joint_weights`` weights the upper-body joints; ``target_joint_pos`` is the HOME
+    pose. Both are {regex: value} dicts resolved once (cached), set per-robot.
     """
     asset: Entity = env.scene[asset_cfg.name]
     cache = getattr(env, _POST_UPPER_CACHE_ATTR, None)
@@ -1613,11 +1625,11 @@ def post_upper_body_posture(
         names = asset.joint_names
         tgt = torch.tensor([resolve_expr(target_joint_pos or {}, names, 0.0)], device=env.device)
         w = torch.tensor([resolve_expr(joint_weights or {}, names, 0.0)], device=env.device)
-        cache = {"tgt": tgt, "w": w}
+        cache = {"tgt": tgt, "w": w, "n_w": w.sum().clamp(min=1.0)}
         setattr(env, _POST_UPPER_CACHE_ATTR, cache)
     err = asset.data.joint_pos - cache["tgt"]  # [B, J]
-    metric = torch.sum(cache["w"] * err.pow(2), dim=1)  # [B]
-    return torch.exp(-scale * metric) * _post_gate(asset, height_threshold)
+    metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B], mean
+    return torch.clamp(1.0 - scale * metric, min=0.0) * _post_gate(asset, height_threshold)
 
 
 def post_feet_parallel(

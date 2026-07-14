@@ -6,7 +6,8 @@
 # It watches a run's checkpoint dir and, whenever a `model_<N>.pt` with N a multiple of
 # --interval appears (checkpoints are saved every 100 iters, so 500/1000/... all exist),
 # runs play.py with your standard eval characteristics and saves the clip to
-#   logs/rsl_rl/g1_getup/<run>/videos/auto/model_<N>.mp4
+#   logs/rsl_rl/g1_getup/<run>/videos/play/model_<N>_force<F>N_beta<B>.mp4
+# (the filename records the exact assist force and beta the clip was rendered with)
 #
 # Decoupled from training: if a render fails (e.g. transient GPU OOM) it just logs and
 # retries on the next poll; it never touches the training process.
@@ -103,19 +104,21 @@ if [ -z "$RUNDIR" ] || [ ! -d "$RUNDIR" ]; then
   echo "[auto_video] could not resolve a run dir for query '$RUN_QUERY' under $LOGROOT"
   exit 1
 fi
-OUTDIR="$RUNDIR/videos/auto"
+# Final videos land in videos/play/ (same dir play.py renders into), named with the
+# eval parameters so each clip is self-describing:
+#   model_<N>_force<F>N_beta<B>.mp4
 PLAYDIR="$RUNDIR/videos/play"
-mkdir -p "$OUTDIR"
+OUTDIR="$PLAYDIR"
+mkdir -p "$PLAYDIR"
 
 echo "[auto_video] repo     : $REPO"
 echo "[auto_video] run dir  : $RUNDIR"
 echo "[auto_video] interval : every $INTERVAL iters  | beta=$BETA  device=${DEVICE:-<play default cuda:0>}"
-echo "[auto_video] output   : $OUTDIR/model_<N>.mp4"
+echo "[auto_video] output   : $OUTDIR/model_<N>_force<F>N_beta<B>.mp4"
 echo "[auto_video] poll     : ${POLL}s   once=$ONCE"
 
 render_ckpt() {
   local ckpt="$1" n="$2"
-  local out="$OUTDIR/model_${n}.mp4"
   echo "[auto_video] $(date '+%H:%M:%S') rendering model_${n} ..."
   local dev_arg=()
   [ -n "$DEVICE" ] && dev_arg=(--device "$DEVICE")
@@ -131,7 +134,9 @@ render_ckpt() {
   case "$force" in ''|*[!0-9.]*) force="";; esac  # keep only a clean number
   local force_note="unaided (0 N)"
   [ -n "$force" ] && force_note="${force} N"
-  echo "[auto_video]   eval assist force: $force_note"
+  echo "[auto_video]   eval params: assist_force=$force_note  beta=$BETA"
+  # Filename records the exact eval parameters this clip was rendered with.
+  local out="$OUTDIR/model_${n}_force${force:-0}N_beta${BETA}.mp4"
   if [ "$DRYRUN" -eq 1 ]; then
     echo "[auto_video] DRY-RUN would execute:"
     echo "  GETUP_EVAL_ASSIST_FORCE=${force:-<unset>} MUJOCO_GL=egl conda run -n $ENV_NAME --no-capture-output python scripts/play.py $TASK \\"
@@ -155,9 +160,10 @@ render_ckpt() {
     return 1
   fi
   # play.py writes videos/play/rl-video-step-0.mp4 (overwritten each run); grab the
-  # newest mp4 there and move it to a per-iteration name so nothing is lost.
+  # newest rl-video-* there (NOT the model_* clips we already saved into the same
+  # dir) and rename it to the parameter-stamped per-iteration name.
   local latest
-  latest="$(ls -1t "$PLAYDIR"/*.mp4 2>/dev/null | head -1)"
+  latest="$(ls -1t "$PLAYDIR"/rl-video-*.mp4 2>/dev/null | head -1)"
   if [ -n "$latest" ]; then
     mv -f "$latest" "$out"
     echo "[auto_video] saved $out"
@@ -184,8 +190,16 @@ while true; do
     if [ "$n" -gt 0 ] && [ $((n % INTERVAL)) -eq 0 ]; then
       if [ "$ONCE" -eq 1 ]; then
         [ "$n" -gt "$latest_n" ] && { latest_n="$n"; latest_ckpt="$ckpt"; }
-      elif [ ! -e "$OUTDIR/model_${n}.mp4" ]; then
-        render_ckpt "$ckpt" "$n"
+      else
+        # already rendered? (match both the new parameter-stamped name and the
+        # legacy plain model_<N>.mp4 / old videos/auto location)
+        if ls "$OUTDIR/model_${n}_"*.mp4 >/dev/null 2>&1 \
+           || [ -e "$OUTDIR/model_${n}.mp4" ] \
+           || [ -e "$RUNDIR/videos/auto/model_${n}.mp4" ]; then
+          : # skip, clip already exists
+        else
+          render_ckpt "$ckpt" "$n"
+        fi
       fi
     fi
   done

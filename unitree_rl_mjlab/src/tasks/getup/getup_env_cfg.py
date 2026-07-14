@@ -988,15 +988,20 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # leg-dominated post_standing_posture so the arm gradient is not drowned out by the
         # high-weight leg terms in that normalised 29-DOF metric.
         "post_upper_body_posture": RewardTermCfg(
-            func=mdp.post_upper_body_posture, weight=6.0,  # 4.0->6.0: v2_posture ended at
-            # only 9% of cap (0.36/4.0) while com_over_support sat at 90% — the arm-HOME
-            # gradient was losing the trade against CoM compensation. Now outweighs
-            # com_over_support (5.0) so settling arms at HOME pays more than parking
-            # them as a counterweight.
-            # scale 0.5->0.2: exp(-0.5*err) saturates to ~0 when arms are flung far back
-            # (err~6 -> 0.05, dead gradient exactly when correction is needed). 0.2 keeps
-            # a live gradient from far (err~6 -> 0.30) so arms are pulled in toward HOME.
-            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.2,
+            # RESHAPED (v4 arm fix): the old exp(-scale·Σ err²) summed UNNORMALIZED over
+            # ~17 joints — for any realistic arm error the exponential (value AND
+            # gradient) saturated to ~0, which is why raising weight 2->4->6 across three
+            # runs never moved the arms (weight × dead signal is still dead; logged ~10%
+            # of cap all of v3_posture_resume). Now: clamp(1 − scale·mean err², 0) — a
+            # positive [0,1] reward, max exactly at HOME, decreasing LINEARLY, so the
+            # pull toward HOME stays constant at any arm distance.
+            # scale=0.5 (new meaning): reward floors at mean err² = 2 rad² (~1.4 rad RMS
+            # per joint) — well beyond the observed ~0.8 rad RMS, so the gradient is live
+            # over the whole operating range. Weight 6.0 kept: still outranks
+            # com_over_support (5.0) so folding the arms pays more than parking them as a
+            # CoM counterweight.
+            func=mdp.post_upper_body_posture, weight=6.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.5,
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),

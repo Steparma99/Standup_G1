@@ -381,11 +381,17 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["post_upper_body_posture"].params["target_joint_pos"] = dict(
         HOME_KEYFRAME.joint_pos
     )
+    # Weight the joints that visually define a natural stance (shoulder pitch/roll,
+    # elbow) over the ones that barely read on camera (wrists) or are already handled
+    # by post_standing_posture's waist weight (2.0). The uniform 1.0 mask diluted the
+    # normalized mean-error signal across 17 DOF, most of it on low-impact wrists.
     cfg.rewards["post_upper_body_posture"].params["joint_weights"] = {
-        ".*_shoulder_.*": 1.0,
-        ".*_elbow_joint": 1.0,
-        ".*_wrist_.*": 1.0,
-        "waist_.*": 1.0,
+        ".*_shoulder_pitch_joint": 1.5,
+        ".*_shoulder_roll_joint": 1.5,
+        ".*_shoulder_yaw_joint": 0.5,
+        ".*_elbow_joint": 1.5,
+        ".*_wrist_.*": 0.3,
+        "waist_.*": 0.5,
     }
 
     # Full-body HOME pose L2 penalty (replaces exp-form standing_posture).
