@@ -443,13 +443,33 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # fall toward zero as the policy learns to stand unaided.
     # ------------------------------------------------------------------
     if _ASSIST_CURRICULUM_ENABLE:
+        # The curriculum's per-env force tensor (events.py AssistanceCurriculum.__init__,
+        # self._force = torch.full(..., self._initial_force)) is plain in-memory env
+        # state, NOT part of the RSL-RL checkpoint — runner.load() only restores the
+        # actor-critic. So every resume silently restarts the assist force at the
+        # initial value regardless of which checkpoint is loaded (confirmed: every
+        # resumed run's TensorBoard log shows assistance_force=120.0 at its first
+        # logged iteration). GETUP_TRAIN_INITIAL_ASSIST_FORCE lets a resume start from
+        # the force the source run had actually decayed to, e.g.:
+        #   FORCE=$(python scripts/assist_force_at.py <run> <iter>)
+        #   GETUP_TRAIN_INITIAL_ASSIST_FORCE=$FORCE bash launch.sh ... --agent.resume=True ...
+        # Unlike the GETUP_EVAL_ASSIST_FORCE eval override below, this only changes the
+        # STARTING point — decay/ramp stay live so the curriculum keeps annealing
+        # normally from there (eval instead freezes the force constant).
+        _train_force = os.environ.get("GETUP_TRAIN_INITIAL_ASSIST_FORCE")
+        _initial_force_n = (
+            float(_train_force) if _train_force not in (None, "") else _ASSIST_INITIAL_FORCE_N
+        )
+        if _train_force not in (None, ""):
+            print(f"[getup] TRAIN assist force curriculum starting at {_initial_force_n:.1f} N "
+                  "(GETUP_TRAIN_INITIAL_ASSIST_FORCE override, continues decaying normally)")
         cfg.events["assistance_curriculum"] = EventTermCfg(
             mode="step",
             func=AssistanceCurriculum,
             params={
                 "asset_cfg": SceneEntityCfg("robot"),
                 "body_name": "torso_link",
-                "initial_force_n": _ASSIST_INITIAL_FORCE_N,
+                "initial_force_n": _initial_force_n,
                 "force_decay_per_success": _ASSIST_FORCE_DECAY_PER_SUCCESS,
                 "force_min": _ASSIST_FORCE_MIN,
                 "success_height": _ASSIST_SUCCESS_HEIGHT,
