@@ -103,7 +103,15 @@ case "$BACKEND" in
       EXTRA_ARGS+=("--env.scene.num-envs=$NUM_ENVS")
     fi
     if [[ "$*" != *"--gpu-ids"* ]]; then
-      EXTRA_ARGS+=("--gpu-ids" "[$GPU_IDS_CLEAN]")
+      # --gpu-ids indexes into the list of devices CUDA_VISIBLE_DEVICES already
+      # exposed to this process, NOT physical GPU IDs — with CUDA_VISIBLE_DEVICES=1,
+      # that GPU becomes the process's device 0. So this must always be a
+      # sequential range [0], [0,1], ... sized to the number of selected GPUs,
+      # never the physical IDs in GPU_IDS_CLEAN themselves (e.g. "[1]" would index
+      # past a single-GPU masked view and crash with IndexError).
+      NUM_SELECTED=$(echo "$GPU_IDS_CLEAN" | awk -F',' '{print NF}')
+      SEQ_IDS=$(seq 0 $((NUM_SELECTED - 1)) | paste -sd, -)
+      EXTRA_ARGS+=("--gpu-ids" "[$SEQ_IDS]")
     fi
     ;;
 
