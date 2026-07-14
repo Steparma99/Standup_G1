@@ -997,12 +997,16 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             # ~0.28/1000 it). The penalty form is unbounded: unlike a capped positive
             # reward it keeps hurting at ANY distance, and the quadratic gradient grows
             # with the error instead of flattening.
-            # weight=-10.0: at the observed mean err² ≈ 0.65 the penalty is ≈ -6.5 —
-            # larger than com_over_support's entire cap (5.0), so parking the arms out
-            # as a CoM counterweight is now a net loss. Post_task group stays strongly
-            # positive (~50 budget). If the stand degrades (stable_hold / ep-length
-            # drop) back off toward -6; if arms still converge too slowly raise to -15.
-            func=mdp.post_upper_body_posture, weight=-10.0,
+            # weight -10 -> -20: v5_arm_penalty run showed a clean dose-response (dead
+            # exp -> weak positive -> -10 penalty each moved the plateau closer to HOME:
+            # 0.81 -> 0.67 rad RMS) but -10 plateaued at ≈ -4.5 (~38° RMS) for the last
+            # ~120 it while com_over_support never budged. Double the cost to test
+            # whether magnitude is still the limiting factor before touching the
+            # balance term. Guardrails unchanged: if stable_hold / ep-length drop,
+            # back off (-10 was stable); if -20 plateaus at similar error with
+            # com_over_support still frozen, revisit com_over_support instead of
+            # escalating further.
+            func=mdp.post_upper_body_posture, weight=-20.0,
             params={"target_joint_pos": {}, "joint_weights": {}, "scale": 1.0,
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
