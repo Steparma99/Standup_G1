@@ -1597,24 +1597,25 @@ def post_upper_body_posture(
     env: ManagerBasedRlEnv,
     target_joint_pos: dict[str, float],
     joint_weights: dict[str, float],
-    scale: float = 0.5,
+    scale: float = 1.0,
     height_threshold: float = H_STAGE2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Post-task upper-body posture: clamp(1 − scale·mean_w (q−q*)², 0) · gate [B,].
+    """Post-task upper-body posture PENALTY: scale·mean_w (q−q*)² · gate [B,].
 
-    Positive reward in [0, 1], maximal (=1) exactly at the HOME pose, decreasing
-    LINEARLY with the weighted mean per-joint squared error. Two properties the old
-    exp(-scale·Σ err²) form lacked:
+    Returns a NON-NEGATIVE weighted mean per-joint squared error from the HOME
+    pose — use with a NEGATIVE weight. Best possible value is 0, achieved exactly
+    at HOME. Properties (vs the original exp(-scale·Σ err²) form):
 
-    - NORMALIZED: the metric is divided by the total joint weight, so it is a mean
-      per-joint error, not a sum growing with the joint count. The unnormalized sum
-      over ~17 joints saturated the exponential to ~0 for any realistic arm error
-      (same bug standing_posture() fixed and documents).
-    - NON-VANISHING GRADIENT: linear in the mean squared error, so the pull toward
-      HOME is constant at any distance until the clamp floor (mean err² = 1/scale,
-      i.e. ~1.4 rad RMS per joint at scale 0.5) instead of dying exponentially
-      exactly when the arms are far off and the signal is needed most.
+    - NORMALIZED: divided by the total joint weight, so it is a mean per-joint
+      error, not a sum growing with the joint count (the unnormalized 17-joint sum
+      saturated the exponential to ~0 at any realistic arm error — dead gradient).
+    - UNBOUNDED, NON-VANISHING GRADIENT: quadratic in the error, so the pull
+      toward HOME is proportional to the distance at ANY distance — no clamp
+      floor, no exponential die-off. Same shape as home_pose_l2(), scoped to the
+      upper body. Chosen after the positive clamp(1−scale·mean, 0) variant proved
+      too weak against com_over_support at trainable weights (v4_arm_home_fix run:
+      arms stuck ~0.8 rad RMS off HOME after 900 iterations).
 
     ``joint_weights`` weights the upper-body joints; ``target_joint_pos`` is the HOME
     pose. Both are {regex: value} dicts resolved once (cached), set per-robot.
@@ -1629,7 +1630,7 @@ def post_upper_body_posture(
         setattr(env, _POST_UPPER_CACHE_ATTR, cache)
     err = asset.data.joint_pos - cache["tgt"]  # [B, J]
     metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B], mean
-    return torch.clamp(1.0 - scale * metric, min=0.0) * _post_gate(asset, height_threshold)
+    return scale * metric * _post_gate(asset, height_threshold)
 
 
 def post_feet_parallel(

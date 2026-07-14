@@ -988,20 +988,22 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # leg-dominated post_standing_posture so the arm gradient is not drowned out by the
         # high-weight leg terms in that normalised 29-DOF metric.
         "post_upper_body_posture": RewardTermCfg(
-            # RESHAPED (v4 arm fix): the old exp(-scale·Σ err²) summed UNNORMALIZED over
-            # ~17 joints — for any realistic arm error the exponential (value AND
-            # gradient) saturated to ~0, which is why raising weight 2->4->6 across three
-            # runs never moved the arms (weight × dead signal is still dead; logged ~10%
-            # of cap all of v3_posture_resume). Now: clamp(1 − scale·mean err², 0) — a
-            # positive [0,1] reward, max exactly at HOME, decreasing LINEARLY, so the
-            # pull toward HOME stays constant at any arm distance.
-            # scale=0.5 (new meaning): reward floors at mean err² = 2 rad² (~1.4 rad RMS
-            # per joint) — well beyond the observed ~0.8 rad RMS, so the gradient is live
-            # over the whole operating range. Weight 6.0 kept: still outranks
-            # com_over_support (5.0) so folding the arms pays more than parking them as a
-            # CoM counterweight.
-            func=mdp.post_upper_body_posture, weight=6.0,
-            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 0.5,
+            # PENALTY (v5 arm fix): now returns the weighted mean per-joint squared
+            # error from HOME (non-negative, 0 = perfect) — weight must be NEGATIVE.
+            # History: exp form was gradient-dead (unnormalized 17-joint sum, weight
+            # raises 2->4->6 did nothing); the v4 positive linear clamp(1−0.5·mean, 0)
+            # had a live gradient but at weight 6.0 was too weak vs com_over_support —
+            # arms stuck ~0.8 rad RMS off HOME after 900 iterations (climb rate only
+            # ~0.28/1000 it). The penalty form is unbounded: unlike a capped positive
+            # reward it keeps hurting at ANY distance, and the quadratic gradient grows
+            # with the error instead of flattening.
+            # weight=-10.0: at the observed mean err² ≈ 0.65 the penalty is ≈ -6.5 —
+            # larger than com_over_support's entire cap (5.0), so parking the arms out
+            # as a CoM counterweight is now a net loss. Post_task group stays strongly
+            # positive (~50 budget). If the stand degrades (stable_hold / ep-length
+            # drop) back off toward -6; if arms still converge too slowly raise to -15.
+            func=mdp.post_upper_body_posture, weight=-10.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "scale": 1.0,
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
