@@ -1598,27 +1598,39 @@ def post_upper_body_posture(
     target_joint_pos: dict[str, float],
     joint_weights: dict[str, float],
     scale: float = 1.0,
+    k: float = 3.0,
+    max_metric: float = 1.0,
     height_threshold: float = H_STAGE2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Post-task upper-body posture PENALTY: scale·mean_w (q−q*)² · gate [B,].
+    """Post-task upper-body posture PENALTY: scale·(exp(k·metric) − 1) · gate [B,].
 
-    Returns a NON-NEGATIVE weighted mean per-joint squared error from the HOME
-    pose — use with a NEGATIVE weight. Best possible value is 0, achieved exactly
-    at HOME. Properties (vs the original exp(-scale·Σ err²) form):
+    `metric` is the weighted MEAN per-joint squared error from the HOME pose
+    (normalized by total joint weight), clamped to `max_metric`. Returns a
+    NON-NEGATIVE value — use with a NEGATIVE weight. Best possible is 0, exactly
+    at HOME.
 
-    - NORMALIZED: divided by the total joint weight, so it is a mean per-joint
-      error, not a sum growing with the joint count (the unnormalized 17-joint sum
-      saturated the exponential to ~0 at any realistic arm error — dead gradient).
-    - UNBOUNDED, NON-VANISHING GRADIENT: quadratic in the error, so the pull
-      toward HOME is proportional to the distance at ANY distance — no clamp
-      floor, no exponential die-off. Same shape as home_pose_l2(), scoped to the
-      upper body. Chosen after the positive clamp(1−scale·mean, 0) variant proved
-      too weak against com_over_support at trainable weights (v4_arm_home_fix run:
-      arms stuck ~0.8 rad RMS off HOME after 900 iterations).
+    Shape history (each form sim-verified, then evaluated over a standardized
+    1000-it resume from the same checkpoint):
+    - exp(-scale·Σ err²) REWARD: gradient-dead (unnormalized 17-joint sum
+      saturated at any realistic error).
+    - linear positive clamp(1−0.5·metric, 0), weight 6: live but weak
+      (0.81→0.67 rad RMS, plateau).
+    - linear PENALTY metric·weight, -10 then -20: better (→0.60 rad RMS) but
+      diminishing returns per weight doubling, plateauing while the residual
+      error was still visually wrong.
+    This form makes the penalty grow SUPRALINEARLY with the error instead of
+    scaling the same linear ramp harder: at the observed plateau (metric≈0.36)
+    and especially at the resume start (metric≈0.62) the gradient k·exp(k·m)
+    exceeds the outgoing linear form's constant slope, while near HOME it eases
+    off (the residual polish there is post_standing_posture's job). Same
+    bounded-exponential pattern as the hand-contact penalty (exp(excess/scale)−1
+    with a clamp): `max_metric` caps the worst per-step penalty (at defaults
+    scale·(e³−1) ≈ 19·scale·|weight|) so a transient flail while the gate is
+    open cannot swamp the post_task budget or teach stand-avoidance.
 
-    ``joint_weights`` weights the upper-body joints; ``target_joint_pos`` is the HOME
-    pose. Both are {regex: value} dicts resolved once (cached), set per-robot.
+    ``joint_weights`` weights the upper-body joints; ``target_joint_pos`` is the
+    HOME pose. Both are {regex: value} dicts resolved once (cached), set per-robot.
     """
     asset: Entity = env.scene[asset_cfg.name]
     cache = getattr(env, _POST_UPPER_CACHE_ATTR, None)
@@ -1630,7 +1642,8 @@ def post_upper_body_posture(
         setattr(env, _POST_UPPER_CACHE_ATTR, cache)
     err = asset.data.joint_pos - cache["tgt"]  # [B, J]
     metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B], mean
-    return scale * metric * _post_gate(asset, height_threshold)
+    metric = torch.clamp(metric, max=max_metric)
+    return scale * (torch.exp(k * metric) - 1.0) * _post_gate(asset, height_threshold)
 
 
 def post_feet_parallel(

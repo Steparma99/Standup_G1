@@ -997,17 +997,22 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             # ~0.28/1000 it). The penalty form is unbounded: unlike a capped positive
             # reward it keeps hurting at ANY distance, and the quadratic gradient grows
             # with the error instead of flattening.
-            # weight -10 -> -20: v5_arm_penalty run showed a clean dose-response (dead
-            # exp -> weak positive -> -10 penalty each moved the plateau closer to HOME:
-            # 0.81 -> 0.67 rad RMS) but -10 plateaued at ≈ -4.5 (~38° RMS) for the last
-            # ~120 it while com_over_support never budged. Double the cost to test
-            # whether magnitude is still the limiting factor before touching the
-            # balance term. Guardrails unchanged: if stable_hold / ep-length drop,
-            # back off (-10 was stable); if -20 plateaus at similar error with
-            # com_over_support still frozen, revisit com_over_support instead of
-            # escalating further.
-            func=mdp.post_upper_body_posture, weight=-20.0,
+            # EXPONENTIAL form (v7): linear penalty showed diminishing returns per
+            # weight doubling (-10 plateaued at 0.67 rad RMS, -20 at 0.60) and the
+            # rollout diagnostic RULED OUT com_over_support as the opposing force
+            # (4.94 stuck vs 4.99 HOME — 1.2% of cap, noise): there is no fixed
+            # opponent to out-price, the limit is gradient magnitude at the current
+            # error. exp(k·metric)−1 grows supralinearly: at weight -2.5, k=3 the
+            # gradient at the v6 plateau (metric 0.36) is ~22 (vs linear-20's
+            # constant 20) and at the resume start (0.62) ~48 — strongest early
+            # pull of any form tried — while the worst clamped transient
+            # (metric=1.0) costs 2.5·(e³−1) ≈ 48/step, comparable to one step of
+            # the post_task positive budget (~50), so it cannot teach
+            # stand-avoidance. Near HOME the pull eases (post_standing_posture
+            # handles the final polish).
+            func=mdp.post_upper_body_posture, weight=-2.5,
             params={"target_joint_pos": {}, "joint_weights": {}, "scale": 1.0,
+                    "k": 3.0, "max_metric": 1.0,
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
