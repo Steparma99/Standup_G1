@@ -45,8 +45,7 @@ _IMU_BIAS_CLIP = 0.05    # hard clip on sampled bias [g]
 _IMU_ACC_NOISE = 0.5     # white-noise half-range [g] (conservative sim2real margin)
 _IMU_DELAY_MAX_LAG = 1   # sensor latency in control steps (0 = none; 1 = 10 ms)
 
-_HEAD_IMPACT_PENALTY_THRESHOLD = 250.0
-_HEAD_IMPACT_PENALTY_SCALE = 250.0
+_HEAD_IMPACT_PENALTY_THRESHOLD = 250.0  # metric/diag threshold (penalty term removed v9)
 _HEAD_IMPACT_TERMINATION_THRESHOLD = 1200.0
 
 # Grace window (env-steps) before the velocity / feet-too-high guards arm, so the
@@ -689,33 +688,27 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"lower": 0.99, "margin": 1.0, "value_at_margin": 0.05,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Head protection: penalize any head-terrain contact and escalate on impacts.
+        # Head protection: penalize any head-terrain contact.
         # ramp_steps=20 matches _MASK_STEPS — settling contacts are not penalized.
+        # task_head_impact REMOVED (v9 ablation): it only fired above 250 N excess,
+        # a severity escalation of this per-step contact penalty — both logged 0 from
+        # mid-training on. Head impacts stay observable via the contact/head_impact
+        # METRIC below; re-add mdp.head_impact_penalty if hard head slams reappear.
         "task_head_contact": RewardTermCfg(
             func=mdp.head_contact_penalty,
             weight=-0.5,
             params={"sensor_name": "contact_head", "ramp_steps": 20},
         ),
-        "task_head_impact": RewardTermCfg(
-            func=mdp.head_impact_penalty,
-            weight=-2.0,
-            params={
-                "sensor_name": "contact_head",
-                "force_threshold": _HEAD_IMPACT_PENALTY_THRESHOLD,
-                "force_scale": _HEAD_IMPACT_PENALTY_SCALE,
-                "ramp_steps": 20,
-            },
-        ),
         # ===================================================================
         # STYLE group (HoST definitive): shape the motion. Binary deviation
         # penalties carry their magnitude in the function; weight=1.0 for those.
         # ===================================================================
-        "style_waist_yaw_deviation": RewardTermCfg(
-            func=mdp.style_waist_yaw_deviation,
-            weight=1.0,
-            params={"limit": 1.4, "penalty": -10.0,
-                    "asset_cfg": SceneEntityCfg("robot", joint_names=("waist_yaw_joint",))},
-        ),
+        # style_waist_yaw_deviation / style_hip_deviation / style_knee_deviation /
+        # style_shoulder_roll_deviation REMOVED (v9 ablation): binary HoST safety-limit
+        # penalties with loose thresholds that logged ~0 for entire converged runs —
+        # they never fired and only added gradient noise. Posture shaping is owned by
+        # post_standing_posture / post_upper_body_posture; hard joint limits are still
+        # guarded by joint_pos_limits (-10). Functions kept in mdp/rewards.py.
         # Incentivize trunk uprightness THROUGH the rise (gate_lo lowered 0.65 -> 0.45 =
         # H_STAGE1) instead of only once standing, so the robot keeps straightening out of
         # the crouch rather than farming crouch rewards. POSITIVE dead-zone reward (was a
@@ -730,27 +723,6 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "require_upright": True,
                     "asset_cfg": SceneEntityCfg(
                         "robot", joint_names=("waist_pitch_joint", "waist_roll_joint"))},
-        ),
-        "style_hip_deviation": RewardTermCfg(
-            func=mdp.style_hip_deviation,
-            weight=2.0,  # was 1.0 — stronger hip alignment during standing
-            params={"roll_limit": 1.4, "yaw_limit": 0.9, "penalty": -10.0,
-                    "asset_cfg": SceneEntityCfg("robot")},
-        ),
-        "style_knee_deviation": RewardTermCfg(
-            func=mdp.style_knee_deviation,
-            weight=4.0,  # 2.0->4.0: v2_posture run ended with this term at -0.45 (near
-            # floor) and worsening as assist decayed — knees bend to stay stable, which
-            # shifts the CoM and drags the arms off HOME to satisfy com_over_support (5.0).
-            # Must out-price the crouch at the root.
-            params={"hi_limit": 2.85, "lo_limit": -0.06, "penalty": -0.25,  # Ground value
-                    "asset_cfg": SceneEntityCfg("robot", joint_names=(".*_knee_joint",))},
-        ),
-        "style_shoulder_roll_deviation": RewardTermCfg(
-            func=mdp.style_shoulder_roll_deviation,
-            weight=1.0,
-            params={"left_limit": -0.4, "right_limit": 0.4, "penalty": -2.5,
-                    "asset_cfg": SceneEntityCfg("robot")},
         ),
         # CoM-in-support; weight 2.5 per foot (function sums both feet). Active > Stage 2.
         # clip_min=0.0: allows reward to reach exp(0)=1.0/foot when feet are centered under pelvis.
@@ -805,14 +777,9 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"tilt_threshold": 0.05, "reward": 20.0,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Feet stumble: 0 on flat Ground (this env) -> weight 0 no-op scaffold. Raise the
-        # penalty magnitude when platform/slope/wall terrains are added (Sim2Real phase).
-        "style_feet_stumble": RewardTermCfg(
-            func=mdp.style_feet_stumble,
-            weight=0.0,
-            params={"sensor_name": "feet_ground_contact", "ratio": 3.0, "penalty": 0.0,
-                    "asset_cfg": SceneEntityCfg("robot")},
-        ),
+        # style_feet_stumble REMOVED (v9 ablation): weight-0 no-op scaffold on flat
+        # Ground. Re-add from mdp.style_feet_stumble when platform/slope/wall terrains
+        # arrive (Sim2Real phase).
         # Hand contact: exponential penalty on contact force, active at ALL stages.
         # Dead zone <= free_force (hand weight ~7.65 N) → 0 penalty; grows as
         # exp(excess/force_scale)-1 above that. Capped internally at 5×force_scale
@@ -1043,10 +1010,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # across the full operating range. Before normalization the exp saturated to
         # ~0 for any realistic pose (logged 0.0000 the entire previous run).
         "post_standing_posture": RewardTermCfg(
-            func=mdp.standing_posture, weight=7.5,  # 5.0->7.5: was stuck at 13% of cap
-            # (0.67/5.0) at end of v2_posture while sibling post terms sat at 85-90%;
-            # raise toward the base-height/orientation tier (10.0) so full-body HOME
-            # match is worth collecting once standing is stable.
+            func=mdp.standing_posture, weight=10.0,  # 5.0->7.5->10.0: v8 still plateaued
+            # at ~32% of cap (2.42/7.5) while base-height/orientation sat at 85-90%;
+            # raised to their tier (10.0) so closing the remaining full-body HOME error
+            # (bent knees, trailing arm) pays as much as holding height/uprightness.
             params={"target_joint_pos": {}, "joint_weights": {},
                     "pelvis_height_threshold": 0.65, "kp": 4.0,
                     "asset_cfg": SceneEntityCfg("robot")},
@@ -1069,9 +1036,15 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # scale lowered 10 -> 2.0: at 10 a duck stance (hip_yaw ±0.4 rad) gave
         # exp(-10·2·0.16)=0.04 ≈ saturated (logged ~0.005 all run, no gradient to
         # straighten feet). At 2.0 the same stance gives 0.53 — real gradient.
+        # v9: weight 2.5 -> 4.0 and ramp_from=0.45 (same rise-phase fade-in as
+        # post_base_height/orientation). The v8 run logged this term FALLING
+        # 0.40 -> 0.096 over training — hip yaw drifted (legs crossing) while every
+        # other post term climbed, i.e. at 2.5 with a standing-only band gate it was
+        # losing the trade against com_over_support/stable stance rewards.
         "post_feet_yaw": RewardTermCfg(
-            func=mdp.post_feet_yaw, weight=2.5,
-            params={"scale": 2.0, "asset_cfg": SceneEntityCfg("robot")},
+            func=mdp.post_feet_yaw, weight=4.0,
+            params={"scale": 2.0, "ramp_from": 0.45,
+                    "asset_cfg": SceneEntityCfg("robot")},
         ),
         # CoM-over-support-polygon: exp(-dist_scale·d²) between the TRUE whole-body CoM
         # (mujoco subtree_com — captures ARM position, ~2.6 cm forward of pelvis at HOME

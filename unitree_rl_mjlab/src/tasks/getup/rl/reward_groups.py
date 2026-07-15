@@ -32,7 +32,6 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "task_head_height": "task",
     "task_base_orientation": "task",
     "task_head_contact": "task",
-    "task_head_impact": "task",
     # Stage-0 bootstrap: directional progress signals for floor-level learning.
     "height_progress": "task",
     "prone_recovery": "task",
@@ -40,17 +39,15 @@ REWARD_GROUP_MAP: dict[str, str] = {
     # Crouch->stand bridge: dense feet-planted pelvis-height climbing signal.
     "pelvis_height_bridge": "task",
     # --- STYLE (HoST definitive): motion shaping ----------------------------------
-    "style_waist_yaw_deviation": "style",
+    # (v9 ablation removed the binary deviation penalties: waist_yaw/hip/knee/
+    # shoulder_roll deviation + the weight-0 feet_stumble scaffold. Extra map entries
+    # are harmless, but keep this in sync with getup_env_cfg.py's rewards dict.)
     "style_waist_upright": "style",
-    "style_hip_deviation": "style",
-    "style_knee_deviation": "style",
-    "style_shoulder_roll_deviation": "style",
     "style_foot_displacement": "style",
     "style_foot_distance": "style",
     "style_shank_orientation": "style",
     "style_base_ang_vel": "style",
     "style_ankle_parallel": "style",
-    "style_feet_stumble": "style",
     "style_hand_left_contact": "style",
     "style_hand_right_contact": "style",
     # --- REGULARIZATION (HoST definitive): weak shaping penalties ------------------

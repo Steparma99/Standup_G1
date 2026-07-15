@@ -385,11 +385,20 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # elbow) over the ones that barely read on camera (wrists) or are already handled
     # by post_standing_posture's waist weight (2.0). The uniform 1.0 mask diluted the
     # normalized mean-error signal across 17 DOF, most of it on low-impact wrists.
+    # v9 LEFT/RIGHT SPLIT (experiment): the right arm stayed behind the back through
+    # v1-v8 while the left converged — HOME_KEYFRAME is correctly mirrored (checked
+    # against the MJCF joint-range convention), so this is a policy/physical
+    # asymmetry, not a target bug. Because the metric is a normalized MEAN, the
+    # converged left arm masks the bad right arm; up-weighting the right joints puts
+    # the residual gradient where the residual error is.
     cfg.rewards["post_upper_body_posture"].params["joint_weights"] = {
-        ".*_shoulder_pitch_joint": 1.5,
-        ".*_shoulder_roll_joint": 1.5,
+        "left_shoulder_pitch_joint": 1.5,
+        "right_shoulder_pitch_joint": 2.5,
+        "left_shoulder_roll_joint": 1.5,
+        "right_shoulder_roll_joint": 2.5,
         ".*_shoulder_yaw_joint": 0.5,
-        ".*_elbow_joint": 1.5,
+        "left_elbow_joint": 1.5,
+        "right_elbow_joint": 2.5,
         ".*_wrist_.*": 0.3,
         "waist_.*": 0.5,
     }
@@ -414,8 +423,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Arms — raised 1.5->2.5 / wrists 0.5->1.5 so the arm gradient is not drowned
         # out by the high-weight legs in this normalised metric (fixes arms trailing
         # behind the trunk). HOME sets shoulder_pitch/roll + elbow targets.
-        ".*_shoulder_.*": 2.5,
-        ".*_elbow_joint": 2.5,
+        # v9: right arm up-weighted vs left (same rationale as the
+        # post_upper_body_posture split above — persistent right-arm-behind-back).
+        "left_shoulder_.*": 2.5,
+        "right_shoulder_.*": 3.5,
+        "left_elbow_joint": 2.5,
+        "right_elbow_joint": 3.5,
         ".*_wrist_.*": 1.5,
     }
 

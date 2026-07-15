@@ -1679,18 +1679,26 @@ def post_feet_yaw(
     env: ManagerBasedRlEnv,
     scale: float = 10.0,
     height_threshold: float = H_STAGE2,
+    ramp_from: float | None = None,
     joint_names: tuple[str, ...] = ("left_hip_yaw_joint", "right_hip_yaw_joint"),
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Post-task feet yaw alignment: exp(-scale·(q_yawL² + q_yawR²))·1(h>H_STAGE2) [B,].
+    """Post-task feet yaw alignment: exp(-scale·(q_yawL² + q_yawR²))·gate [B,].
 
     Both feet point straight forward when hip_yaw=0. Decays when the robot toes
     out or in after standing. Peak reward = 1.0 when both hip_yaw = 0.
+
+    ``ramp_from``: None keeps the hard standing band; a low anchor (H_STAGE1=0.45)
+    fades the reward in through the rise so hip-yaw alignment is shaped while the
+    legs-crossed habit forms, not only once already standing (the v8 run logged
+    this term DECLINING 0.40->0.096 over training with the band gate).
     """
     asset: Entity = env.scene[asset_cfg.name]
     ids = _cached_joint_ids(env, asset, joint_names, "_post_feet_yaw_joint_ids")
     q = asset.data.joint_pos[:, ids]  # [B, 2]
-    return torch.exp(-scale * q.pow(2).sum(dim=1)) * _post_gate(asset, height_threshold)
+    return torch.exp(-scale * q.pow(2).sum(dim=1)) * _post_gate(
+        asset, height_threshold, ramp_from=ramp_from
+    )
 
 
 _JOINT_VEL_LIMIT_CACHE = "_joint_vel_limit_cache"

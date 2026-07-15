@@ -577,7 +577,11 @@ def style_violation_check(env: ManagerBasedRlEnv) -> None:
     t.align = "l"
     t.align["weighted value"] = "r"
 
+    active = set(rm.active_terms)
     for desc, jpat, jval, term, expect in checks:
+        if term not in active:
+            t.add_row([desc, term, "-", expect, "skipped (term not active)"])
+            continue
         if jpat == "_NONE_":
             # reset to clean HOME
             asset.write_root_link_pose_to_sim(home_root, env_ids=torch.tensor([0]))
