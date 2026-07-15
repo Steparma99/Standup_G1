@@ -155,6 +155,21 @@ render_ckpt() {
       --video=True --video-length "$VLEN" --video-width "$VW" --video-height "$VH" \
       "${dev_arg[@]}"
   local rc=$?
+  if [ $rc -ne 0 ] && [ -z "$DEVICE" ]; then
+    # Default device is the training GPU — a render there can fail every poll
+    # (OOM/contention with the 4096-env training), silently producing NO videos
+    # for the whole run. Fall back to a CPU render: slower but reliable.
+    echo "[auto_video] model_${n} failed on GPU (rc=$rc) — retrying on cpu"
+    GETUP_EVAL_ASSIST_FORCE="${force}" MUJOCO_GL=egl conda run -n "$ENV_NAME" --no-capture-output \
+      python scripts/play.py "$TASK" \
+        --checkpoint-file "$ckpt" \
+        --eval-beta "$BETA" \
+        --num-envs "$NUM_ENVS" --max-extra-envs "$EXTRA" \
+        --cam-distance "$CAMD" --cam-elevation "$CAME" \
+        --video=True --video-length "$VLEN" --video-width "$VW" --video-height "$VH" \
+        --device cpu
+    rc=$?
+  fi
   if [ $rc -ne 0 ]; then
     echo "[auto_video] FAILED model_${n} (rc=$rc) — will retry next poll"
     return 1

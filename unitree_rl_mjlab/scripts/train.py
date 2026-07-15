@@ -81,6 +81,41 @@ def _start_training_viewer(env: "ManagerBasedRlEnv", fps: float = 30.0) -> None:
   print(f"[INFO] Training viewer → http://localhost:8080  (env 0, {fps:.0f} fps)")
 
 
+_GETUP_ASSIST_TAG = "Episode_Metrics/curriculum/assistance_force"
+
+
+def _resume_assist_force(resume_path: Path) -> float | None:
+  """Assist force (N) the source run had at the resumed checkpoint, or None.
+
+  Reads the source run's TensorBoard events (same lookup as
+  scripts/assist_force_at.py) at the iteration encoded in the checkpoint
+  filename (model_<N>.pt). None means "could not determine" (no events file,
+  tag absent, or unparseable checkpoint name) — caller should fall back to the
+  configured initial force.
+  """
+  import glob
+  import re
+
+  m = re.match(r"model_(\d+)$", resume_path.stem)
+  if m is None:
+    return None
+  iteration = int(m.group(1))
+  events = sorted(glob.glob(str(resume_path.parent / "events.out.tfevents.*")))
+  if not events:
+    return None
+  try:
+    from tensorboard.backend.event_processing import event_accumulator
+
+    ea = event_accumulator.EventAccumulator(events[-1], size_guidance={"scalars": 0})
+    ea.Reload()
+    if _GETUP_ASSIST_TAG not in set(ea.Tags().get("scalars", [])):
+      return None
+    vals = ea.Scalars(_GETUP_ASSIST_TAG)
+    return float(min(vals, key=lambda s: abs(s.step - iteration)).value)
+  except Exception:
+    return None
+
+
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
   if cuda_visible == "":
@@ -131,21 +166,44 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   if rank == 0:
     print(f"[INFO] Logging experiment in directory: {log_dir}")
 
-  env = ManagerBasedRlEnv(
-    cfg=cfg.env, device=device, render_mode="rgb_array" if cfg.video else None
-  )
-
-  if cfg.viewer:
-    _start_training_viewer(env, cfg.viewer_fps)
-
   log_root_path = log_dir.parent  # Go up from specific run dir to experiment dir.
 
+  # Resolve the resume checkpoint BEFORE creating the env: the getup assistance
+  # curriculum's per-env force tensor is plain env state, not part of the RSL-RL
+  # checkpoint, so without intervention every resume restarts the assist force at
+  # the configured initial value (120 N). Continue instead from the force the
+  # source run had actually decayed to at the resumed iteration, read from its
+  # TensorBoard log. An explicit GETUP_TRAIN_INITIAL_ASSIST_FORCE still wins
+  # (env_cfgs.py bakes it into the cfg at construction time, before this runs).
   resume_path: Path | None = None
   if cfg.agent.resume:
       # Load checkpoint from local filesystem.
       resume_path = get_checkpoint_path(
         log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
       )
+      assist_ev = (getattr(cfg.env, "events", None) or {}).get("assistance_curriculum")
+      if assist_ev is not None and not os.environ.get("GETUP_TRAIN_INITIAL_ASSIST_FORCE"):
+        force = _resume_assist_force(resume_path)
+        if force is not None:
+          assist_ev.params["initial_force_n"] = force
+          print(
+            f"[getup] resume: assist-force curriculum continuing from {force:.1f} N "
+            f"(read from {resume_path.parent.name} at {resume_path.stem}, "
+            "decay/ramp stay live)"
+          )
+        else:
+          print(
+            "[getup] resume: could not read the source run's assistance_force from "
+            "its TensorBoard events — curriculum restarts at the configured "
+            f"initial force ({assist_ev.params.get('initial_force_n', '?')} N)"
+          )
+
+  env = ManagerBasedRlEnv(
+    cfg=cfg.env, device=device, render_mode="rgb_array" if cfg.video else None
+  )
+
+  if cfg.viewer:
+    _start_training_viewer(env, cfg.viewer_fps)
 
   # Only record videos on rank 0 to avoid multiple workers writing to the same files.
   if cfg.video and rank == 0:

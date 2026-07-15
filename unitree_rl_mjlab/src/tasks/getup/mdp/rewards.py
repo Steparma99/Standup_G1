@@ -1601,9 +1601,16 @@ def post_upper_body_posture(
     k: float = 3.0,
     max_metric: float = 1.0,
     height_threshold: float = H_STAGE2,
+    ramp_from: float | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Post-task upper-body posture PENALTY: scale·(exp(k·metric) − 1) · gate [B,].
+
+    ``ramp_from`` selects the gate's height-ramp mode (see _post_gate): None keeps
+    the default symmetric band [0.57, 0.73]; a low anchor (e.g. H_STAGE1=0.45)
+    fades the penalty in from Stage 2 entry so arm posture is shaped DURING the
+    rise instead of only once standing — the arms-behind-the-back habit forms in
+    the rise phase, where the band gate is fully closed and cannot correct it.
 
     `metric` is the weighted MEAN per-joint squared error from the HOME pose
     (normalized by total joint weight), clamped to `max_metric`. Returns a
@@ -1643,7 +1650,9 @@ def post_upper_body_posture(
     err = asset.data.joint_pos - cache["tgt"]  # [B, J]
     metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B], mean
     metric = torch.clamp(metric, max=max_metric)
-    return scale * (torch.exp(k * metric) - 1.0) * _post_gate(asset, height_threshold)
+    return scale * (torch.exp(k * metric) - 1.0) * _post_gate(
+        asset, height_threshold, ramp_from=ramp_from
+    )
 
 
 def post_feet_parallel(

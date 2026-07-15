@@ -446,15 +446,18 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # The curriculum's per-env force tensor (events.py AssistanceCurriculum.__init__,
         # self._force = torch.full(..., self._initial_force)) is plain in-memory env
         # state, NOT part of the RSL-RL checkpoint — runner.load() only restores the
-        # actor-critic. So every resume silently restarts the assist force at the
-        # initial value regardless of which checkpoint is loaded (confirmed: every
-        # resumed run's TensorBoard log shows assistance_force=120.0 at its first
-        # logged iteration). GETUP_TRAIN_INITIAL_ASSIST_FORCE lets a resume start from
-        # the force the source run had actually decayed to, e.g.:
-        #   FORCE=$(python scripts/assist_force_at.py <run> <iter>)
-        #   GETUP_TRAIN_INITIAL_ASSIST_FORCE=$FORCE bash launch.sh ... --agent.resume=True ...
-        # Unlike the GETUP_EVAL_ASSIST_FORCE eval override below, this only changes the
-        # STARTING point — decay/ramp stay live so the curriculum keeps annealing
+        # actor-critic, so a bare resume would restart the assist force at the initial
+        # value (confirmed: pre-fix resumed runs' TensorBoard logs all show
+        # assistance_force=120.0 at their first logged iteration; v7_arm_exp resumed
+        # at it2000 with 120 N instead of the source run's decayed value).
+        # scripts/train.py now handles this automatically on --agent.resume=True: it
+        # reads the source run's logged assistance_force at the resumed checkpoint's
+        # iteration and overrides initial_force_n before the env is built.
+        # GETUP_TRAIN_INITIAL_ASSIST_FORCE remains as a manual override and takes
+        # precedence over the automatic lookup, e.g.:
+        #   GETUP_TRAIN_INITIAL_ASSIST_FORCE=70 bash launch.sh ... --agent.resume=True ...
+        # Unlike the GETUP_EVAL_ASSIST_FORCE eval override below, both paths only change
+        # the STARTING point — decay/ramp stay live so the curriculum keeps annealing
         # normally from there (eval instead freezes the force constant).
         _train_force = os.environ.get("GETUP_TRAIN_INITIAL_ASSIST_FORCE")
         _initial_force_n = (

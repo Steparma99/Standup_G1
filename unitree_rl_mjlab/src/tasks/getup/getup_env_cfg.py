@@ -1014,6 +1014,15 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             params={"target_joint_pos": {}, "joint_weights": {}, "scale": 1.0,
                     "k": 3.0, "max_metric": 1.0,
                     "height_threshold": 0.65,
+                    # ramp_from=H_STAGE1 (v8 arm fix): fade the penalty in from
+                    # Stage 2 entry (h=0.45) instead of the symmetric band
+                    # [0.57, 0.73]. The arms-back pose is locked in DURING the
+                    # rise, where the band gate was fully closed — v7_arm_exp
+                    # showed the post-stand pull alone improves the metric
+                    # (-9.8 -> -4.8 over 1000 it) but can't undo the habit in
+                    # video. Stage 0/1 (h<0.45, floor righting/push-off) stays
+                    # ungated so arm use for push-off is not penalized.
+                    "ramp_from": 0.45,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Full-body HOME pose L2 penalty gated to standing (h_pelvis > 0.65 m).
