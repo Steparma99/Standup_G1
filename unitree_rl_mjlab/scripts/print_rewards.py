@@ -12,7 +12,8 @@ Usage:
     (default: logs/rsl_rl/g1_getup relative to cwd).
 
 With --all every scalar tag in the event file is printed (useful for discovery).
-Without --all prints the standard health metrics + all Episode_Reward/* terms found.
+Without --all prints the standard health metrics, the CURRENT configured reward stack
+(group + weight from the G1 get-up config), and all Episode_Reward/* terms found.
 """
 
 from __future__ import annotations
@@ -21,8 +22,12 @@ import argparse
 import glob
 import os
 import sys
+from dataclasses import dataclass
 
 from tensorboard.backend.event_processing import event_accumulator
+
+from src.tasks.getup.config.g1.env_cfgs import unitree_g1_getup_env_cfg
+from src.tasks.getup.rl.reward_groups import REWARD_GROUP_MAP
 
 HEALTH_TAGS = [
     "Train/mean_episode_length",
@@ -49,6 +54,64 @@ HEALTH_TAGS = [
     "Episode_Metrics/contact/feet",
     "Episode_Metrics/contact/torso",
 ]
+
+
+@dataclass(frozen=True)
+class RewardMeta:
+    group: str
+    weight: float | None
+
+
+def load_reward_meta() -> tuple[dict[str, RewardMeta], str | None]:
+    """Load the current active reward config for the G1 get-up task."""
+    try:
+        cfg = unitree_g1_getup_env_cfg()
+        rewards = getattr(cfg, "rewards", {})
+        meta = {
+            name: RewardMeta(
+                group=REWARD_GROUP_MAP.get(name, "?"),
+                weight=getattr(term_cfg, "weight", None),
+            )
+            for name, term_cfg in rewards.items()
+        }
+        return meta, None
+    except Exception as exc:  # noqa: BLE001
+        return {}, f"[WARN] Could not load current reward config: {exc}"
+
+
+def format_weight(weight: float | None) -> str:
+    return "?" if weight is None else f"{weight:g}"
+
+
+def ordered_reward_tags(
+    reward_meta: dict[str, RewardMeta], available: set[str]
+) -> list[str]:
+    """Return logged reward tags ordered like the current config, then extras."""
+    available_reward_tags = {t for t in available if t.startswith("Episode_Reward/")}
+    ordered = [
+        f"Episode_Reward/{name}"
+        for name in reward_meta
+        if f"Episode_Reward/{name}" in available_reward_tags
+    ]
+    extras = sorted(available_reward_tags - set(ordered))
+    return ordered + extras
+
+
+def print_reward_config_summary(
+    reward_meta: dict[str, RewardMeta], available: set[str]
+) -> None:
+    """Print the current reward stack with group/weight and log presence."""
+    if not reward_meta:
+        return
+
+    print("\n=== CURRENT REWARD CONFIG (G1 GET-UP) ===")
+    for name, meta in reward_meta.items():
+        tag = f"Episode_Reward/{name}"
+        status = "logged in run" if tag in available else "not in run"
+        print(
+            f"{name:<30} group={meta.group:<14} "
+            f"weight={format_weight(meta.weight):>7}  {status}"
+        )
 
 
 def resolve_run_dir(run: str, logdir: str) -> str:
@@ -85,8 +148,9 @@ def main() -> None:
     ea = event_accumulator.EventAccumulator(ev, size_guidance={"scalars": 0})
     ea.Reload()
     available: set[str] = set(ea.Tags().get("scalars", []))
+    reward_meta, reward_meta_warn = load_reward_meta()
 
-    def sample(tag: str) -> None:
+    def sample(tag: str, header: str | None = None) -> None:
         if tag not in available:
             return
         vals = ea.Scalars(tag)
@@ -94,7 +158,7 @@ def main() -> None:
         idxs = (list(range(len(vals))) if len(vals) <= n
                 else [round(i * (len(vals) - 1) / (n - 1)) for i in range(n)])
         pts = [(vals[i].step, vals[i].value) for i in idxs]
-        print(tag + ":")
+        print((header or tag) + ":")
         print("  " + "  ".join(f"it{s}={v:.4f}" for s, v in pts))
 
     if args.all:
@@ -106,12 +170,27 @@ def main() -> None:
         for t in HEALTH_TAGS:
             sample(t)
 
+        if reward_meta_warn:
+            print(f"\n{reward_meta_warn}")
+        print_reward_config_summary(reward_meta, available)
+
         # All individual reward terms (auto-discovered)
-        reward_tags = sorted(t for t in available if t.startswith("Episode_Reward/"))
+        reward_tags = ordered_reward_tags(reward_meta, available)
         if reward_tags:
             print("\n=== INDIVIDUAL REWARD TERMS ===")
             for t in reward_tags:
-                sample(t)
+                reward_name = t.split("/", 1)[1]
+                meta = reward_meta.get(reward_name)
+                if meta is None:
+                    sample(t, header=f"{t}  [group=?, weight=?]")
+                else:
+                    sample(
+                        t,
+                        header=(
+                            f"{t}  [group={meta.group}, "
+                            f"weight={format_weight(meta.weight)}]"
+                        ),
+                    )
         else:
             print("\n[INFO] No Episode_Reward/* tags found.")
             print("Available tag prefixes:", sorted({t.rsplit("/", 1)[0] for t in available}))
