@@ -18,14 +18,21 @@
 #     --no-video            disabilita i video automatici
 #     --video-interval N    intervallo iterazioni (default 500)
 #     --video-device D      device per il render, es. cpu / cuda:1
+#
+# Run CONCORRENTI: i PID file sono per-run (.training_<run>.pid /
+# .autovideo_<run>.pid), quindi si possono lanciare più run con NOMI DIVERSI
+# in parallelo, ognuno sulla propria GPU (--gpu N è consumato da train.sh):
+#   bash launch.sh Unitree-G1-GetUp run_a --agent.max-iterations=2000
+#   bash launch.sh Unitree-G1-GetUp run_b --gpu 1 --video-device cuda:1 ...
+# kill.sh <run_name> killa un run specifico; kill.sh senza argomenti killa tutto.
 # ============================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/unitree_rl_mjlab/logs"
-PID_FILE="$SCRIPT_DIR/.training.pid"
-VIDEO_PID_FILE="$SCRIPT_DIR/.autovideo.pid"
 TASK_LOGROOT="$SCRIPT_DIR/unitree_rl_mjlab/logs/rsl_rl/g1_getup"
+# PID file PER-RUN (.training_<run>.pid): consente run CONCORRENTI su GPU diverse
+# (es. scratch su GPU0 + resume su GPU1). Definiti dopo che RUN_NAME è noto.
 
 if [ $# -lt 1 ]; then
     echo "Uso: bash launch.sh <task> [run_name] [extra args...]"
@@ -58,14 +65,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 LOG_FILE="$LOG_DIR/train_${RUN_NAME}.log"
+PID_FILE="$SCRIPT_DIR/.training_${RUN_NAME}.pid"
+VIDEO_PID_FILE="$SCRIPT_DIR/.autovideo_${RUN_NAME}.pid"
 
 mkdir -p "$LOG_DIR"
 
-# Se c'è già un training, avvisa
+# Se c'è già un training CON QUESTO RUN NAME, avvisa (run con nomi diversi
+# possono coesistere — usare --gpu per metterli su GPU diverse).
 if [ -f "$PID_FILE" ]; then
     OLD_PID=$(cat "$PID_FILE")
     if kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "[WARN] Training già in corso (PID $OLD_PID). Killalo prima con: bash kill.sh"
+        echo "[WARN] Training '$RUN_NAME' già in corso (PID $OLD_PID). Killalo prima con: bash kill.sh $RUN_NAME"
         exit 1
     fi
 fi
@@ -89,7 +99,7 @@ echo "[OK] Training lanciato — PID: $PID"
 echo ""
 echo "Monitora con:  bash status.sh"
 echo "Log live con:  tail -f $LOG_FILE"
-echo "Killa con:     bash kill.sh"
+echo "Killa con:     bash kill.sh $RUN_NAME   (bash kill.sh senza argomenti killa TUTTI i run)"
 echo ""
 
 # Aspetta 6 secondi e mostra le prime righe del log per confermare

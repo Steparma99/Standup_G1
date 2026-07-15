@@ -6,24 +6,28 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/unitree_rl_mjlab/logs"
-PID_FILE="$SCRIPT_DIR/.training.pid"
 
 echo "========================================"
 echo "  TRAINING STATUS"
 echo "========================================"
 
-# --- PID ---
-if [ -f "$PID_FILE" ]; then
+# --- PID: un file per run (.training_<run>.pid; il glob copre anche il
+# legacy .training.pid). Più run possono essere vivi in parallelo. ---
+FOUND=0
+for PID_FILE in "$SCRIPT_DIR"/.training*.pid; do
+    [ -f "$PID_FILE" ] || continue
+    FOUND=1
+    RUN=$(basename "$PID_FILE" .pid); RUN=${RUN#.training}; RUN=${RUN#_}
     PID=$(cat "$PID_FILE")
     if kill -0 "$PID" 2>/dev/null; then
-        echo "[OK] Training IN CORSO — PID: $PID"
         ELAPSED=$(ps -o etime= -p "$PID" 2>/dev/null | tr -d ' ' || echo "?")
-        echo "     Durata: $ELAPSED"
+        echo "[OK] Training IN CORSO — run: ${RUN:-<default>}  PID: $PID  durata: $ELAPSED"
     else
-        echo "[STOP] Training TERMINATO (PID $PID non più attivo)"
+        echo "[STOP] Training TERMINATO — run: ${RUN:-<default>} (PID $PID non più attivo)"
         rm -f "$PID_FILE"
     fi
-else
+done
+if [ "$FOUND" -eq 0 ]; then
     # Cerca comunque un processo train.py attivo
     PROCS=$(pgrep -a -f "unitree_rl_mjlab/scripts/train.py" 2>/dev/null || true)
     if [ -n "$PROCS" ]; then
@@ -57,5 +61,5 @@ else
 fi
 
 echo ""
-echo "Killa con:   bash kill.sh"
+echo "Killa con:   bash kill.sh [run_name]   (senza argomenti killa TUTTI i run)"
 echo "========================================"

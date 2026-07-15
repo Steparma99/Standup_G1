@@ -1,82 +1,87 @@
 #!/usr/bin/env bash
 # ============================================================
-# kill.sh — Killa il training in corso e verifica
-# Uso: bash kill.sh
+# kill.sh — Killa training + auto_video
+#
+# Uso:
+#   bash kill.sh              # killa TUTTI i run (training + watcher video)
+#   bash kill.sh <run_name>   # killa SOLO quel run (PID file .training_<run>.pid)
+#
+# I PID file sono per-run (creati da launch.sh): .training_<run>.pid e
+# .autovideo_<run>.pid. Il glob .training*.pid copre anche i file legacy
+# (.training.pid / .autovideo.pid) di run lanciati prima di questo schema.
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PID_FILE="$SCRIPT_DIR/.training.pid"
-VIDEO_PID_FILE="$SCRIPT_DIR/.autovideo.pid"
+RUN_QUERY="${1:-}"
 
 echo "========================================"
-echo "  KILL TRAINING"
+echo "  KILL TRAINING${RUN_QUERY:+ (run: $RUN_QUERY)}"
 echo "========================================"
 
-KILLED=0
-
-# Kill dal PID file
-if [ -f "$PID_FILE" ]; then
-    PID=$(cat "$PID_FILE")
+# Killa il gruppo di processi puntato da un PID file, poi rimuove il file.
+_kill_pidfile() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    local PID
+    PID=$(cat "$f")
     if kill -0 "$PID" 2>/dev/null; then
-        echo "[INFO] Termino gruppo processi PID $PID..."
-        # Killa l'intero gruppo (train.sh + python train.py figlio)
+        echo "[INFO] Termino gruppo processi PID $PID ($(basename "$f"))..."
+        local PGID
         PGID=$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ' || echo "")
         if [ -n "$PGID" ] && [ "$PGID" != "0" ]; then
             kill -- -"$PGID" 2>/dev/null || true
         fi
         kill "$PID" 2>/dev/null || true
-        KILLED=1
     else
-        echo "[INFO] PID $PID già terminato"
+        echo "[INFO] PID $PID ($(basename "$f")) già terminato"
     fi
-    rm -f "$PID_FILE"
-fi
+    rm -f "$f"
+}
 
-# Kill qualsiasi train.py residuo
-RESIDUI=$(pgrep -f "unitree_rl_mjlab/scripts/train.py" 2>/dev/null || true)
-if [ -n "$RESIDUI" ]; then
-    echo "[INFO] Processo residuo trovato, termino..."
+# ------------------------------------------------------------
+# Training
+# ------------------------------------------------------------
+if [ -n "$RUN_QUERY" ]; then
+    _kill_pidfile "$SCRIPT_DIR/.training_${RUN_QUERY}.pid"
+    # Residui: il comando python contiene --agent.run-name=<run>
+    pkill -f "agent.run-name=${RUN_QUERY}" 2>/dev/null || true
+else
+    for f in "$SCRIPT_DIR"/.training*.pid; do _kill_pidfile "$f"; done
     pkill -f "unitree_rl_mjlab/scripts/train.py" 2>/dev/null || true
-    KILLED=1
 fi
 
-if [ $KILLED -eq 0 ]; then
-    echo "[--] Nessun training da killare"
-fi
-
-# Verifica finale
 sleep 2
-STILL_ALIVE=$(pgrep -f "unitree_rl_mjlab/scripts/train.py" 2>/dev/null || true)
+if [ -n "$RUN_QUERY" ]; then
+    KILL_PATTERN="agent.run-name=${RUN_QUERY}"
+else
+    KILL_PATTERN="unitree_rl_mjlab/scripts/train.py"
+fi
+STILL_ALIVE=$(pgrep -f "$KILL_PATTERN" 2>/dev/null || true)
 if [ -n "$STILL_ALIVE" ]; then
     echo "[WARN] Processo ancora vivo, uso SIGKILL..."
-    pkill -9 -f "unitree_rl_mjlab/scripts/train.py" 2>/dev/null || true
+    pkill -9 -f "$KILL_PATTERN" 2>/dev/null || true
     sleep 1
 fi
-
-FINAL=$(pgrep -f "unitree_rl_mjlab/scripts/train.py" 2>/dev/null || true)
+FINAL=$(pgrep -f "$KILL_PATTERN" 2>/dev/null || true)
 if [ -z "$FINAL" ]; then
-    echo "[OK] Training terminato con successo"
+    echo "[OK] Training terminato"
 else
     echo "[ERRORE] Non riesco a killare: $FINAL"
 fi
 
 # ------------------------------------------------------------
-# Killa anche il watcher dei video automatici (auto_video.sh)
+# Watcher video (auto_video.sh)
 # ------------------------------------------------------------
-if [ -f "$VIDEO_PID_FILE" ]; then
-    VPID=$(cat "$VIDEO_PID_FILE")
-    if kill -0 "$VPID" 2>/dev/null; then
-        echo "[INFO] Termino auto_video (PID $VPID)..."
-        VPGID=$(ps -o pgid= -p "$VPID" 2>/dev/null | tr -d ' ' || echo "")
-        if [ -n "$VPGID" ] && [ "$VPGID" != "0" ]; then
-            kill -- -"$VPGID" 2>/dev/null || true
-        fi
-        kill "$VPID" 2>/dev/null || true
-    fi
-    rm -f "$VIDEO_PID_FILE"
+if [ -n "$RUN_QUERY" ]; then
+    _kill_pidfile "$SCRIPT_DIR/.autovideo_${RUN_QUERY}.pid"
+    # Residui: auto_video.sh riceve il run name come primo argomento
+    pkill -f "auto_video.sh.*${RUN_QUERY}" 2>/dev/null || true
+    V_ALIVE=$(pgrep -f "auto_video.sh.*${RUN_QUERY}" 2>/dev/null || true)
+else
+    for f in "$SCRIPT_DIR"/.autovideo*.pid; do _kill_pidfile "$f"; done
+    pkill -f "scripts/auto_video.sh" 2>/dev/null || true
+    V_ALIVE=$(pgrep -f "scripts/auto_video.sh" 2>/dev/null || true)
 fi
-pkill -f "scripts/auto_video.sh" 2>/dev/null || true
-V_ALIVE=$(pgrep -f "scripts/auto_video.sh" 2>/dev/null || true)
 if [ -z "$V_ALIVE" ]; then
     echo "[OK] Auto-video terminato"
 else
