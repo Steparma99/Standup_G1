@@ -391,14 +391,18 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # asymmetry, not a target bug. Because the metric is a normalized MEAN, the
     # converged left arm masks the bad right arm; up-weighting the right joints puts
     # the residual gradient where the residual error is.
+    # v9-symmetry: the v1-v8 asymmetric bump (right>left) may itself have taught the
+    # policy an asymmetric objective, reinforcing the right-arm-behind-back rather than
+    # curing it. HOME_KEYFRAME is confirmed correctly mirrored, so weight was the only
+    # asymmetric input. Equalize both sides at the *higher* value (2.5) so the overall
+    # pull toward HOME is not weakened vs the last 2000 iters — only the L/R imbalance
+    # is removed. If the right arm still trails once assist force hits 0, that points to
+    # a real physical/policy asymmetry (see plan Pass 2), not a weight artifact.
     cfg.rewards["post_upper_body_posture"].params["joint_weights"] = {
-        "left_shoulder_pitch_joint": 1.5,
-        "right_shoulder_pitch_joint": 2.5,
-        "left_shoulder_roll_joint": 1.5,
-        "right_shoulder_roll_joint": 2.5,
+        ".*_shoulder_pitch_joint": 2.5,
+        ".*_shoulder_roll_joint": 2.5,
         ".*_shoulder_yaw_joint": 0.5,
-        "left_elbow_joint": 1.5,
-        "right_elbow_joint": 2.5,
+        ".*_elbow_joint": 2.5,
         ".*_wrist_.*": 0.3,
         "waist_.*": 0.5,
     }
@@ -423,12 +427,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # Arms — raised 1.5->2.5 / wrists 0.5->1.5 so the arm gradient is not drowned
         # out by the high-weight legs in this normalised metric (fixes arms trailing
         # behind the trunk). HOME sets shoulder_pitch/roll + elbow targets.
-        # v9: right arm up-weighted vs left (same rationale as the
-        # post_upper_body_posture split above — persistent right-arm-behind-back).
-        "left_shoulder_.*": 2.5,
-        "right_shoulder_.*": 3.5,
-        "left_elbow_joint": 2.5,
-        "right_elbow_joint": 3.5,
+        # v9-symmetry: equalized L/R at the higher value (3.5) — see the matching note
+        # on post_upper_body_posture above. Both terms must agree on how hard to pull
+        # each arm, else they fight over the left-arm target.
+        ".*_shoulder_.*": 3.5,
+        ".*_elbow_joint": 3.5,
         ".*_wrist_.*": 1.5,
     }
 
