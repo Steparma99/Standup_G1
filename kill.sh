@@ -70,23 +70,49 @@ else
 fi
 
 # ------------------------------------------------------------
-# Watcher video (auto_video.sh)
+# Watcher video (auto_video.sh) + eventuale render IN CORSO
+#
+# auto_video.sh lancia il render (conda run -> scripts/play.py) in FOREGROUND
+# dentro se stesso (niente '&'). Se il loop viene terminato mentre un render
+# e' attivo, il processo play.py puo' sopravvivere ORFANO (a volte in un
+# process group separato, a seconda di come conda run spawna il figlio) e
+# continua a scrivere un video per un run che hai appena killato — e' il bug
+# "il video vecchio continua a stampare". Va killato esplicitamente, non solo
+# il loop auto_video.sh.
 # ------------------------------------------------------------
 if [ -n "$RUN_QUERY" ]; then
     _kill_pidfile "$SCRIPT_DIR/.autovideo_${RUN_QUERY}.pid"
-    # Residui: auto_video.sh riceve il run name come primo argomento
+    # Residui: auto_video.sh riceve il run name/dir come primo argomento;
+    # play.py riceve il run nel path di --checkpoint-file.
     pkill -f "auto_video.sh.*${RUN_QUERY}" 2>/dev/null || true
-    V_ALIVE=$(pgrep -f "auto_video.sh.*${RUN_QUERY}" 2>/dev/null || true)
+    pkill -f "scripts/play.py.*${RUN_QUERY}" 2>/dev/null || true
 else
     for f in "$SCRIPT_DIR"/.autovideo*.pid; do _kill_pidfile "$f"; done
     pkill -f "scripts/auto_video.sh" 2>/dev/null || true
-    V_ALIVE=$(pgrep -f "scripts/auto_video.sh" 2>/dev/null || true)
+    # Nessun run specifico da filtrare qui: kill.sh senza argomenti e' gia'
+    # "nucleare", quindi killa qualunque render auto-video in corso.
+    pkill -f "scripts/play.py.*--video" 2>/dev/null || true
 fi
-if [ -z "$V_ALIVE" ]; then
-    echo "[OK] Auto-video terminato"
+
+sleep 2
+if [ -n "$RUN_QUERY" ]; then
+    V_PATTERN="auto_video.sh.*${RUN_QUERY}|scripts/play.py.*${RUN_QUERY}"
 else
-    echo "[WARN] auto_video ancora vivo: $V_ALIVE (SIGKILL...)"
-    pkill -9 -f "scripts/auto_video.sh" 2>/dev/null || true
+    V_PATTERN="scripts/auto_video.sh|scripts/play.py.*--video"
+fi
+V_ALIVE=$(pgrep -f "$V_PATTERN" 2>/dev/null || true)
+if [ -z "$V_ALIVE" ]; then
+    echo "[OK] Auto-video (+ eventuale render) terminato"
+else
+    echo "[WARN] ancora vivo: $V_ALIVE (SIGKILL...)"
+    pkill -9 -f "$V_PATTERN" 2>/dev/null || true
+    sleep 1
+    FINAL_V=$(pgrep -f "$V_PATTERN" 2>/dev/null || true)
+    if [ -z "$FINAL_V" ]; then
+        echo "[OK] Auto-video (+ eventuale render) terminato dopo SIGKILL"
+    else
+        echo "[ERRORE] Non riesco a killare: $FINAL_V"
+    fi
 fi
 
 echo "========================================"
