@@ -406,6 +406,18 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_wrist_.*": 0.3,
         "waist_.*": 0.5,
     }
+    # v9 Pass 2 (arm-weight bump): after Pass 1 (symmetric weights + assist force
+    # decayed to ~0) the arm still trailed and this term kept WORSENING through the
+    # whole 1200-it resume (-1.05 -> -1.23), while stable_hold/fall_after_success
+    # stayed solid. Symmetric weights alone didn't fix it. Bump this term's weight
+    # -2.5 -> -6.0 (base default at getup_env_cfg.py:980) to give the arm-to-HOME
+    # gradient more authority against the other post_task terms. NOT a "huge" jump:
+    # the exp-clamped form's worst-case transient scales linearly with weight
+    # (already ~-48/step at -2.5), and this reward's own history shows big weight
+    # jumps (-10->-20) gave diminishing returns. post_standing_posture (weight 10)
+    # is deliberately left untouched — change one variable at a time. If it works,
+    # dial back to a moderate ~-4.0 in a follow-up (a full revert risks drift-back).
+    cfg.rewards["post_upper_body_posture"].weight = -6.0
 
     # Full-body HOME pose L2 penalty (replaces exp-form standing_posture).
     # Direct quadratic penalty: constant gradient at any distance from HOME.
