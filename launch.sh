@@ -135,18 +135,31 @@ if [ "$AUTO_VIDEO" -eq 1 ]; then
     DEV_ARGS=()
     [ -n "$VIDEO_DEVICE" ] && DEV_ARGS=(--device "$VIDEO_DEVICE")
     nohup bash -c "
-        # Aspetta (max 15 min) che la run dir del training compaia.
+        # Legge la run dir ESATTA dalla riga che train.py stampa nel SUO log
+        # ('[INFO] Logging experiment in directory: <path>'), invece di indovinarla
+        # con un glob su \$RUN_NAME. Il glob poteva agganciarsi a una dir STALE di
+        # un tentativo precedente/fallito con lo stesso nome (es. crash su GPU
+        # piena prima di creare il process reale) e restarci bloccato per sempre,
+        # perché il loop si fermava al PRIMO match e non ricontrollava mai più.
+        d=''
         for i in \$(seq 1 180); do
-            d=\$(ls -1dt '$TASK_LOGROOT'/*'$RUN_NAME'*/ 2>/dev/null | head -1)
-            [ -n \"\$d\" ] && break
+            line=\$(grep -m1 '\[INFO\] Logging experiment in directory:' '$LOG_FILE' 2>/dev/null)
+            if [ -n \"\$line\" ]; then
+                cand=\"\${line#*Logging experiment in directory: }\"
+                cand=\"\${cand%/}\"
+                if [ -d \"\$cand\" ]; then
+                    d=\"\$cand\"
+                    break
+                fi
+            fi
             sleep 5
         done
         if [ -z \"\$d\" ]; then
-            echo '[auto_video-launcher] run dir mai apparsa, esco.'
+            echo '[auto_video-launcher] run dir mai apparsa nel log di training, esco.'
             exit 1
         fi
-        echo \"[auto_video-launcher] run dir trovata: \$d\"
-        exec bash '$SCRIPT_DIR/unitree_rl_mjlab/scripts/auto_video.sh' '$RUN_NAME' \
+        echo \"[auto_video-launcher] run dir (dal log di training): \$d\"
+        exec bash '$SCRIPT_DIR/unitree_rl_mjlab/scripts/auto_video.sh' \"\$(basename \"\$d\")\" \
             --interval '$VIDEO_INTERVAL' ${DEV_ARGS[*]:-}
     " > "$VIDEO_LOG" 2>&1 &
     VIDEO_PID=$!
