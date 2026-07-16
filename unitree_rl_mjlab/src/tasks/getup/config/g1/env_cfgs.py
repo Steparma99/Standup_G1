@@ -90,7 +90,7 @@ _ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated
 # SAME mechanism as the vertical assist force — so it is invariant to env count /
 # episode length. The policy observes its beta (beta_rescaler obs term).
 # ---------------------------------------------------------------------------
-_BETA_CURRICULUM_ENABLE   = False
+_BETA_CURRICULUM_ENABLE   = True
 _BETA_INITIAL             = 1.0
 _BETA_DECREMENT           = 0.01   # was 0.02 — pace authority withdrawal with the
                                    # slower assist-force decay (avoid crutch-dependence)
@@ -174,6 +174,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # after the robot reliably stands and holds from supine.
     cfg.events["reset_pose"].params["keyframes"] = (
         SUPINE_KEYFRAME,
+        PRONE_KEYFRAME,
     )
     if not _ADD_POSE_PERTURBATION:
         cfg.events["reset_pose"].params["joint_pos_range"] = {}
