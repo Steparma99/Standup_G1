@@ -125,4 +125,11 @@ esac
 cd "$MJLAB_DIR"
 echo "[INFO] Launching: python scripts/train.py $* ${EXTRA_ARGS[*]}"
 echo ""
-python scripts/train.py "$@" "${EXTRA_ARGS[@]}"
+# -u: unbuffered stdout/stderr. launch.sh redirects this to a log FILE (not a
+# tty), so Python defaults to full block buffering — early prints (e.g. the
+# "[INFO] Logging experiment in directory: ..." line launch.sh's auto-video
+# watcher greps for) can sit unflushed for a long time even though training
+# is running fine, making the watcher time out waiting for a line that IS
+# being printed, just not yet written to disk. -u also makes `tail -f` on the
+# training log real-time instead of arriving in delayed bursts.
+python -u scripts/train.py "$@" "${EXTRA_ARGS[@]}"
