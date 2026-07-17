@@ -103,6 +103,12 @@ _BETA_HOLD_STEPS          = 50
 # episodes, so a regressed env is not locked at the low-authority floor forever.
 _BETA_RAMP_UP_AFTER_FAILURES = 10   # was 20 — recover authority faster (matches assist)
 _BETA_RAMP_UP_STEP        = 0.02
+# Fix 3 — decay-cooldown rate limiter: after an env decrements beta, it must wait
+# this many full episodes before it may decrement again. Caps the aggregate
+# beta-withdrawal rate even when thousands of envs succeed simultaneously — the
+# runaway feedback loop that collapsed v10_beta_home_anchor once beta fell below
+# ~0.87. Same value as the assist-force curriculum's already-validated cooldown.
+_BETA_DECAY_COOLDOWN_EPISODES = 3
 
 # ---------------------------------------------------------------------------
 # Reset drop + settling phase.
@@ -556,6 +562,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "hold_steps": _BETA_HOLD_STEPS,
                 "ramp_up_after_failures": _BETA_RAMP_UP_AFTER_FAILURES,
                 "ramp_up_step": _BETA_RAMP_UP_STEP,
+                "decay_cooldown_episodes": _BETA_DECAY_COOLDOWN_EPISODES,
                 # Feet-planted qualifier: beta only decays on a GENUINE stand
                 # (head height reached WHILE both feet planted), not a torso-lean
                 # spike — same qualifier as the assistance curriculum above.

@@ -539,6 +539,17 @@ class BetaRescalerCurriculum:
         # locked at the low-authority floor forever.
         self._ramp_up_after = int(p.get("ramp_up_after_failures", 20))
         self._ramp_up_step = float(p.get("ramp_up_step", 0.02))
+        # Fix 3 — decay-cooldown rate limiter (mirrors AssistanceCurriculum): after
+        # an env decrements beta, it must wait this many episodes before it may
+        # decrement again. Without it, at large num_envs a synchronized wave of
+        # successes (e.g. ~350 of 4096 envs holding a stand per iteration once the
+        # policy is good) drops the POPULATION-mean beta far faster than gradient
+        # descent can re-adapt the policy to the shrinking action window — a runaway
+        # positive-feedback loop that cratered the v10_beta_home_anchor run once
+        # beta fell below ~0.87. The per-env ramp-up (Fix 2) is far too slow to
+        # counteract a mass simultaneous decrement. Same fix, same value as the
+        # assist-force curriculum's decay_cooldown_episodes.
+        self._decay_cooldown = int(p.get("decay_cooldown_episodes", 0))
 
         # Feet-planted qualifier (see _both_feet_planted, shared with
         # AssistanceCurriculum): beta only decays on a GENUINE stand, not a
@@ -563,6 +574,12 @@ class BetaRescalerCurriculum:
         )
         # Consecutive FAILED episodes since the last hold / bump (Fix 2 re-ramp).
         self._fail_streak = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
+        )
+        # Per-env remaining cooldown episodes before beta is allowed to decay again
+        # (Fix 3). Persists across resets by design; reset() decrements it once per
+        # episode. Matches AssistanceCurriculum._decay_cooldown_counter.
+        self._decay_cooldown_counter = torch.zeros(
             self._num_envs, device=self._device, dtype=torch.long
         )
 
@@ -590,12 +607,22 @@ class BetaRescalerCurriculum:
         if env_ids is None:
             env_ids = torch.arange(self._num_envs, device=self._device)
         held = self._stable_held[env_ids]
+        cooldown = self._decay_cooldown_counter[env_ids]
+        can_decay = cooldown == 0
+        decayed = held & can_decay
         # Fix 1 — decrement beta only after a genuine held stand (binary credit),
         # not a one-frame head-height touch, so action authority is never withdrawn
-        # on a false positive.
+        # on a false positive. Fix 3 — and only if this env's decay cooldown has
+        # elapsed, rate-limiting how fast the population-mean beta can fall.
         self._beta[env_ids] = torch.where(
-            held, self._beta[env_ids] - self._decrement, self._beta[env_ids]
+            decayed, self._beta[env_ids] - self._decrement, self._beta[env_ids]
         )
+        cooldown = torch.where(
+            decayed,
+            torch.full_like(cooldown, self._decay_cooldown),
+            torch.clamp(cooldown - 1, min=0),
+        )
+        self._decay_cooldown_counter[env_ids] = cooldown
         # Fix 2 — reversible crutch: after ramp_up_after consecutive failed
         # episodes, bump beta back up (restore authority); streak resets on any
         # held stand or bump. Symmetric with the assist-force re-ramp.
