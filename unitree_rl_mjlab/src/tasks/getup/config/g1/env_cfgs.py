@@ -107,8 +107,24 @@ _BETA_RAMP_UP_STEP        = 0.02
 # this many full episodes before it may decrement again. Caps the aggregate
 # beta-withdrawal rate even when thousands of envs succeed simultaneously — the
 # runaway feedback loop that collapsed v10_beta_home_anchor once beta fell below
-# ~0.87. Same value as the assist-force curriculum's already-validated cooldown.
-_BETA_DECAY_COOLDOWN_EPISODES = 3
+# ~0.87. Widened 3 -> 6 after v11_beta_cooldown still bled (stable_hold
+# 0.80 -> 0.49 as beta 0.90 -> 0.63): halve the maximum population decay rate so
+# PPO gets roughly twice the gradient steps per unit of withdrawn authority.
+_BETA_DECAY_COOLDOWN_EPISODES = 6
+# Fix 4 — population circuit breaker (see BetaRescalerCurriculum). Fixes 1-3 are
+# all per-env and could not stop v11's population-wide slow bleed: no single env
+# failed long enough to trigger its own re-ramp, yet the shared policy was losing
+# the skill as the mean beta fell. The breaker watches an EMA of the held-stand
+# fraction across resetting envs and, when it drops below _BETA_PAUSE_BELOW,
+# halts ALL beta decay and nudges beta back up each episode until the EMA
+# recovers above _BETA_RESUME_ABOVE (hysteresis gap prevents flapping).
+# Healthy stable_hold plateaus at ~0.80, so pause at 0.65 catches the bleed well
+# before the 0.49 wreck v11 reached. Logged as curriculum/beta_success_ema and
+# curriculum/beta_paused.
+_BETA_PAUSE_BELOW    = 0.65
+_BETA_RESUME_ABOVE   = 0.75
+_BETA_RECOVERY_STEP  = 0.0025  # per-episode upward nudge while paused (~decrement/cooldown pace)
+_BETA_EMA_ALPHA      = 0.5     # EMA time constant ~2 population-generations of episodes
 
 # ---------------------------------------------------------------------------
 # Reset drop + settling phase.
@@ -549,13 +565,26 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # curriculum/beta_rescaler logs its per-env mean (should fall 1.0 -> 0.25).
     # ------------------------------------------------------------------
     if _BETA_CURRICULUM_ENABLE:
+        # GETUP_TRAIN_INITIAL_BETA: manual override of the beta the curriculum
+        # STARTS from (mirrors GETUP_TRAIN_INITIAL_ASSIST_FORCE above). Needed on
+        # resume: the per-env beta tensor is plain env state, not part of the
+        # RSL-RL checkpoint, so a bare resume restarts beta at _BETA_INITIAL.
+        # Decay/ramp/breaker stay live from the given value (unlike the eval
+        # --eval-beta pin, which freezes it).
+        _train_beta = os.environ.get("GETUP_TRAIN_INITIAL_BETA")
+        _initial_beta = (
+            float(_train_beta) if _train_beta not in (None, "") else _BETA_INITIAL
+        )
+        if _train_beta not in (None, ""):
+            print(f"[getup] TRAIN beta curriculum starting at {_initial_beta:.3f} "
+                  "(GETUP_TRAIN_INITIAL_BETA override, continues annealing normally)")
         cfg.events["beta_rescaler_curriculum"] = EventTermCfg(
             mode="step",
             func=BetaRescalerCurriculum,
             params={
                 "asset_cfg": SceneEntityCfg("robot"),
                 "body_name": "torso_link",
-                "initial_beta": _BETA_INITIAL,
+                "initial_beta": _initial_beta,
                 "decrement": _BETA_DECREMENT,
                 "beta_min": _BETA_MIN,
                 "success_head_height": _BETA_SUCCESS_HEAD_HEIGHT,
@@ -563,6 +592,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "ramp_up_after_failures": _BETA_RAMP_UP_AFTER_FAILURES,
                 "ramp_up_step": _BETA_RAMP_UP_STEP,
                 "decay_cooldown_episodes": _BETA_DECAY_COOLDOWN_EPISODES,
+                # Fix 4 — population circuit breaker (see constants above).
+                "success_ema_alpha": _BETA_EMA_ALPHA,
+                "pause_below": _BETA_PAUSE_BELOW,
+                "resume_above": _BETA_RESUME_ABOVE,
+                "recovery_step": _BETA_RECOVERY_STEP,
                 # Feet-planted qualifier: beta only decays on a GENUINE stand
                 # (head height reached WHILE both feet planted), not a torso-lean
                 # spike — same qualifier as the assistance curriculum above.
@@ -573,6 +607,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         )
         cfg.metrics["curriculum/beta_rescaler"] = MetricsTermCfg(
             func=mdp.beta_rescaler_value
+        )
+        cfg.metrics["curriculum/beta_success_ema"] = MetricsTermCfg(
+            func=mdp.beta_success_ema
+        )
+        cfg.metrics["curriculum/beta_paused"] = MetricsTermCfg(
+            func=mdp.beta_paused
         )
 
     # ------------------------------------------------------------------
@@ -667,6 +707,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # evaluated at full action authority it never deploys with.
         if "beta_rescaler_curriculum" in cfg.events:
             cfg.events["beta_rescaler_curriculum"].params["initial_beta"] = _BETA_MIN
+            # Disable the population circuit breaker at eval time: pause_below=-1
+            # can never trigger, so the recovery nudge cannot lift the pinned beta.
+            cfg.events["beta_rescaler_curriculum"].params["pause_below"] = -1.0
+            cfg.events["beta_rescaler_curriculum"].params["recovery_step"] = 0.0
         cfg.curriculum = {}
 
     return cfg

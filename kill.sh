@@ -80,6 +80,20 @@ fi
 # "il video vecchio continua a stampare". Va killato esplicitamente, non solo
 # il loop auto_video.sh.
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# Watcher beta-floor auto-kill (beta_floor_watch.py, lanciato da launch.sh).
+# Nota: quando e' proprio questo watcher a invocare kill.sh, ha gia' rimosso
+# il suo PID file e si e' staccato con setsid, quindi qui non c'e' nulla da
+# killare — il ramo e' un no-op in quel caso.
+# ------------------------------------------------------------
+if [ -n "$RUN_QUERY" ]; then
+    _kill_pidfile "$SCRIPT_DIR/.betakill_${RUN_QUERY}.pid"
+    pkill -f "beta_floor_watch.py.*${RUN_QUERY}" 2>/dev/null || true
+else
+    for f in "$SCRIPT_DIR"/.betakill*.pid; do _kill_pidfile "$f"; done
+    pkill -f "scripts/beta_floor_watch.py" 2>/dev/null || true
+fi
+
 if [ -n "$RUN_QUERY" ]; then
     _kill_pidfile "$SCRIPT_DIR/.autovideo_${RUN_QUERY}.pid"
     # Residui: auto_video.sh riceve il run name/dir come primo argomento;

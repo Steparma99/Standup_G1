@@ -480,6 +480,9 @@ class AssistanceCurriculum:
 
 _BETA_RESCALER_ATTR = "_beta_rescaler"  # per-env beta, read by the action term,
                                         # the beta observation and the beta metric.
+_BETA_CURRICULUM_ATTR = "_beta_curriculum"  # the curriculum instance itself, read
+                                            # by the breaker metrics (success EMA
+                                            # + paused flag).
 
 
 class BetaRescalerCurriculum:
@@ -550,6 +553,24 @@ class BetaRescalerCurriculum:
         # counteract a mass simultaneous decrement. Same fix, same value as the
         # assist-force curriculum's decay_cooldown_episodes.
         self._decay_cooldown = int(p.get("decay_cooldown_episodes", 0))
+        # Fix 4 — population circuit breaker. All per-env safeguards above are
+        # LOCAL: the cooldown paces one env's decay, the re-ramp only fires after
+        # one env personally fails ramp_up_after episodes in a row. But all envs
+        # share one policy, so successes are correlated — a synchronized wave can
+        # drop the population-mean beta faster than PPO re-adapts, while no single
+        # env's fail-streak is long enough to trigger its re-ramp (the slow bleed
+        # seen in v11_beta_cooldown: stable_hold 0.80 -> 0.49 as beta 0.90 -> 0.63).
+        # This breaker closes the missing population-level feedback loop: track an
+        # EMA of the held-stand fraction over resetting envs; when it drops below
+        # pause_below, HALT all decay globally (and nudge beta back up a little
+        # each episode) until the EMA recovers above resume_above. The gap between
+        # the two thresholds (hysteresis) prevents rapid on/off flapping.
+        self._ema_alpha = float(p.get("success_ema_alpha", 0.5))
+        self._pause_below = float(p.get("pause_below", 0.65))
+        self._resume_above = float(p.get("resume_above", 0.75))
+        self._recovery_step = float(p.get("recovery_step", 0.0025))
+        self._success_ema = 1.0
+        self._paused = False
 
         # Feet-planted qualifier (see _both_feet_planted, shared with
         # AssistanceCurriculum): beta only decays on a GENUINE stand, not a
@@ -583,8 +604,10 @@ class BetaRescalerCurriculum:
             self._num_envs, device=self._device, dtype=torch.long
         )
 
-        # Expose the per-env beta tensor for the action term / obs / metric.
+        # Expose the per-env beta tensor for the action term / obs / metric, and
+        # the instance itself for the circuit-breaker metrics (EMA + paused flag).
         setattr(env, _BETA_RESCALER_ATTR, self._beta)
+        setattr(env, _BETA_CURRICULUM_ATTR, self)
 
     def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
         del env_ids, kwargs  # step events always act on all envs
@@ -607,9 +630,32 @@ class BetaRescalerCurriculum:
         if env_ids is None:
             env_ids = torch.arange(self._num_envs, device=self._device)
         held = self._stable_held[env_ids]
+        # Fix 4 — population circuit breaker. Fold this reset batch's held
+        # fraction into the population EMA. The blend factor is scaled by the
+        # batch's share of the population so the EMA's effective time constant
+        # (~1/ema_alpha population-generations of episodes) does not depend on
+        # how many envs happen to reset in one call.
+        n_batch = int(held.numel())
+        if n_batch > 0:
+            k = min(1.0, self._ema_alpha * n_batch / self._num_envs)
+            self._success_ema = (
+                (1.0 - k) * self._success_ema + k * float(held.float().mean())
+            )
+        if self._paused:
+            if self._success_ema > self._resume_above:
+                self._paused = False
+        elif self._success_ema < self._pause_below:
+            self._paused = True
         cooldown = self._decay_cooldown_counter[env_ids]
         can_decay = cooldown == 0
         decayed = held & can_decay
+        if self._paused:
+            # Breaker engaged: the population is not keeping up with the current
+            # beta — halt ALL decay (every env, regardless of its own cooldown)
+            # and actively walk beta back up a little each episode until the
+            # population success EMA recovers above resume_above.
+            decayed = torch.zeros_like(decayed)
+            self._beta[env_ids] = self._beta[env_ids] + self._recovery_step
         # Fix 1 — decrement beta only after a genuine held stand (binary credit),
         # not a one-frame head-height touch, so action authority is never withdrawn
         # on a false positive. Fix 3 — and only if this env's decay cooldown has

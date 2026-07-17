@@ -40,7 +40,12 @@ from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 
-from .events import _ASSIST_FORCE_ATTR, _BETA_RESCALER_ATTR, get_episode_state
+from .events import (
+    _ASSIST_FORCE_ATTR,
+    _BETA_CURRICULUM_ATTR,
+    _BETA_RESCALER_ATTR,
+    get_episode_state,
+)
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -77,6 +82,36 @@ def beta_rescaler_value(env: "ManagerBasedRlEnv") -> torch.Tensor:
     if beta is None:
         return torch.ones(env.num_envs, device=env.device)
     return beta
+
+
+def beta_success_ema(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Population EMA of the beta curriculum's held-stand fraction [B,].
+
+    The circuit breaker's competence signal: fraction of resetting envs that
+    achieved a genuine held stand, smoothed over ~2 population-generations of
+    episodes. Healthy training sits around the stable_hold level (~0.8); the
+    breaker pauses beta decay when this drops below pause_below and resumes
+    above resume_above. Returns ones when the curriculum is disabled.
+    """
+    cur = getattr(env, _BETA_CURRICULUM_ATTR, None)
+    if cur is None:
+        return torch.ones(env.num_envs, device=env.device)
+    return torch.full((env.num_envs,), cur._success_ema, device=env.device)
+
+
+def beta_paused(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Circuit-breaker state of the beta curriculum [B,]: 1 = decay paused.
+
+    While 1, no env decays beta (regardless of per-env cooldowns) and beta is
+    nudged back up each episode until the population success EMA recovers.
+    Returns zeros when the curriculum is disabled.
+    """
+    cur = getattr(env, _BETA_CURRICULUM_ATTR, None)
+    if cur is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.full(
+        (env.num_envs,), 1.0 if cur._paused else 0.0, device=env.device
+    )
 
 # ---------------------------------------------------------------------------
 # Stage boundaries (pelvis height in metres, matching reward gates)

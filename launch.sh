@@ -19,6 +19,15 @@
 #     --video-interval N    intervallo iterazioni (default 500)
 #     --video-device D      device per il render, es. cpu / cuda:1
 #
+# Auto-kill a fine curriculum beta (ON di default): un watcher parallelo
+# (scripts/beta_floor_watch.py) controlla curriculum/beta_rescaler e quando
+# resta al floor 0.25 per abbastanza iterazioni consecutive esegue kill.sh sul
+# run — il curriculum e' finito, inutile bruciare le iterazioni residue (es.
+# run lanciati per il weekend). Flag (consumati da launch.sh):
+#     --no-beta-kill        disabilita l'auto-kill
+#     --beta-kill-iters N   iterazioni consecutive al floor prima del kill (default 75)
+#     --beta-kill-env NAME  conda env per il watcher (default unitree_rl_cuda)
+#
 # Run CONCORRENTI: i PID file sono per-run (.training_<run>.pid /
 # .autovideo_<run>.pid), quindi si possono lanciare più run con NOMI DIVERSI
 # in parallelo, ognuno sulla propria GPU (--gpu N è consumato da train.sh):
@@ -51,22 +60,29 @@ else
     shift || true  # consuma run_name solo se non inizia con --
 fi
 
-# Separa i flag video (consumati qui) dagli extra args per train.py.
+# Separa i flag video/beta-kill (consumati qui) dagli extra args per train.py.
 AUTO_VIDEO=1
 VIDEO_INTERVAL=500
 VIDEO_DEVICE=""
+BETA_KILL=1
+BETA_KILL_ITERS=75
+BETA_KILL_ENV="unitree_rl_cuda"
 EXTRA_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-video) AUTO_VIDEO=0; shift;;
         --video-interval) VIDEO_INTERVAL="$2"; shift 2;;
         --video-device) VIDEO_DEVICE="$2"; shift 2;;
+        --no-beta-kill) BETA_KILL=0; shift;;
+        --beta-kill-iters) BETA_KILL_ITERS="$2"; shift 2;;
+        --beta-kill-env) BETA_KILL_ENV="$2"; shift 2;;
         *) EXTRA_ARGS+=("$1"); shift;;
     esac
 done
 LOG_FILE="$LOG_DIR/train_${RUN_NAME}.log"
 PID_FILE="$SCRIPT_DIR/.training_${RUN_NAME}.pid"
 VIDEO_PID_FILE="$SCRIPT_DIR/.autovideo_${RUN_NAME}.pid"
+BETAKILL_PID_FILE="$SCRIPT_DIR/.betakill_${RUN_NAME}.pid"
 
 mkdir -p "$LOG_DIR"
 
@@ -180,4 +196,70 @@ if [ "$AUTO_VIDEO" -eq 1 ]; then
     echo "     Output:     <run_dir>/videos/play/model_<N>_force<F>N_beta<B>.mp4"
 else
     echo "[--] Video automatici disabilitati (--no-video)"
+fi
+
+# ------------------------------------------------------------
+# Auto-kill a fine curriculum beta: watcher parallelo che monitora
+# curriculum/beta_rescaler nel tfevents del run e, quando resta al floor 0.25
+# per >= BETA_KILL_ITERS iterazioni CONSECUTIVE, esegue kill.sh sul run.
+# Se il training finisce/crasha da solo il watcher esce senza killare.
+# ------------------------------------------------------------
+if [ "$BETA_KILL" -eq 1 ]; then
+    if [ -f "$BETAKILL_PID_FILE" ]; then
+        OLD_BPID=$(cat "$BETAKILL_PID_FILE")
+        if kill -0 "$OLD_BPID" 2>/dev/null; then
+            echo "[INFO] Termino beta-kill watcher precedente (PID $OLD_BPID)"
+            kill "$OLD_BPID" 2>/dev/null || true
+        fi
+        rm -f "$BETAKILL_PID_FILE"
+    fi
+    BETAKILL_LOG="$LOG_DIR/betakill_${RUN_NAME}.log"
+    nohup bash -c "
+        # Stessa risoluzione della run dir del watcher video: legge il path
+        # ESATTO dalla riga stampata da train.py nel suo log (niente glob).
+        d=''
+        for i in \$(seq 1 180); do
+            line=\$(grep -m1 '\[INFO\] Logging experiment in directory:' '$LOG_FILE' 2>/dev/null)
+            if [ -n \"\$line\" ]; then
+                cand=\"\${line#*Logging experiment in directory: }\"
+                cand=\"\${cand%/}\"
+                if [[ \"\$cand\" = /* ]]; then
+                    abscand=\"\$cand\"
+                else
+                    abscand=\"$SCRIPT_DIR/unitree_rl_mjlab/\$cand\"
+                fi
+                if [ -d \"\$abscand\" ]; then
+                    d=\"\$abscand\"
+                    break
+                fi
+            fi
+            sleep 5
+        done
+        if [ -z \"\$d\" ]; then
+            echo '[betakill-launcher] run dir mai apparsa nel log di training, esco.'
+            exit 1
+        fi
+        echo \"[betakill-launcher] run dir: \$d\"
+        cd '$SCRIPT_DIR/unitree_rl_mjlab'
+        conda run -n '$BETA_KILL_ENV' --no-capture-output \
+            python scripts/beta_floor_watch.py \"\$d\" --hold-iters '$BETA_KILL_ITERS'
+        rc=\$?
+        if [ \"\$rc\" -eq 0 ]; then
+            echo '[betakill-launcher] beta al floor: killo il run $RUN_NAME'
+            # Rimuove il proprio PID file PRIMA di kill.sh (che altrimenti
+            # killerebbe questo stesso gruppo di processi a meta' esecuzione);
+            # setsid stacca kill.sh dal nostro process group per lo stesso motivo.
+            rm -f '$BETAKILL_PID_FILE'
+            exec setsid bash '$SCRIPT_DIR/kill.sh' '$RUN_NAME'
+        fi
+        echo \"[betakill-launcher] watcher uscito con rc=\$rc, nessun kill.\"
+        rm -f '$BETAKILL_PID_FILE'
+    " > "$BETAKILL_LOG" 2>&1 &
+    BETAKILL_PID=$!
+    echo "$BETAKILL_PID" > "$BETAKILL_PID_FILE"
+    echo "[OK] Beta-floor auto-kill attivo (PID $BETAKILL_PID) — killa il run dopo"
+    echo "     $BETA_KILL_ITERS iterazioni consecutive con beta_rescaler al floor 0.25"
+    echo "     Log watcher:  tail -f $BETAKILL_LOG"
+else
+    echo "[--] Beta-floor auto-kill disabilitato (--no-beta-kill)"
 fi
