@@ -147,8 +147,19 @@ if [ "$AUTO_VIDEO" -eq 1 ]; then
             if [ -n \"\$line\" ]; then
                 cand=\"\${line#*Logging experiment in directory: }\"
                 cand=\"\${cand%/}\"
-                if [ -d \"\$cand\" ]; then
-                    d=\"\$cand\"
+                # train.py prints this path relative to its OWN cwd (train.sh cd's
+                # into unitree_rl_mjlab/ before running python), but this watcher
+                # subshell's cwd is launch.sh's, one directory up — so the plain
+                # \$cand never existed from here and the -d check failed silently
+                # for the full 15-minute wait every time. Resolve it against the
+                # mjlab dir explicitly instead of relying on cwd.
+                if [[ \"\$cand\" = /* ]]; then
+                    abscand=\"\$cand\"
+                else
+                    abscand=\"$SCRIPT_DIR/unitree_rl_mjlab/\$cand\"
+                fi
+                if [ -d \"\$abscand\" ]; then
+                    d=\"\$abscand\"
                     break
                 fi
             fi
