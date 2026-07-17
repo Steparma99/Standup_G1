@@ -105,49 +105,12 @@ MUJOCO_GL=egl conda run -n unitree_rl_cuda python scripts/play.py Unitree-G1-Get
 
 
 
-**Visualize Rewards on the server**:
+**Visualize Rewards on the server**: 
 
-conda run -n unitree_rl_cuda python scripts/print_rewards.py 2026-06-30_12-19-34
-
+conda run -n unitree_rl_cuda python scripts/print_rewards.py 2026-07-16_16-17-51_v9_beta_prone
 
 
 cd ~/Standup/Standup_G1/unitree_rl_mjlab/logs/rsl_rl/g1_getup
 RUN="2026-06-24_09-34-38_Phase_3_no_jump/"
 
-conda run --no-capture-output -n unitree_rl_cuda python3 - "$RUN" <<'EOF'
-import sys, glob
-from tensorboard.backend.event_processing import event_accumulator
-run = sys.argv[1]
-ev = glob.glob(run + "events.out.tfevents.*")[0]
-ea = event_accumulator.EventAccumulator(ev, size_guidance={'scalars': 0})
-ea.Reload()
 
-def sample(tag, n=12):
-    if tag not in ea.Tags().get('scalars', []):
-        print(f"{tag}: NOT FOUND")
-        return
-    vals = ea.Scalars(tag)
-    idxs = range(len(vals)) if len(vals) <= n else [round(i*(len(vals)-1)/(n-1)) for i in range(n)]
-    pts = [(vals[i].step, vals[i].value) for i in idxs]
-    print(tag + ":")
-    print("  " + "  ".join(f"it{s}={v:.4f}" for s, v in pts))
-
-tags = [
-  "Train/mean_episode_length", "Train/mean_reward",
-  "Episode_Termination/no_progress_timeout", "Episode_Termination/time_out",
-  "Episode_Termination/ground_penetration", "Episode_Termination/base_vel_explosion",
-  "Episode_Termination/joint_vel_explosion",
-  "Episode_Metrics/stage/stage0", "Episode_Metrics/stage/stage1",
-  "Episode_Metrics/stage/stage2", "Episode_Metrics/stage/stage3",
-  "Episode_Metrics/success/candidate", "Episode_Metrics/success/ever_stood",
-  "Episode_Metrics/success/stable_hold", "Episode_Metrics/success/fall_after_success",
-  "Episode_Metrics/curriculum/assistance_force", "Episode_Metrics/curriculum/beta_rescaler",
-  "Episode_Metrics/reward_group/task", "Episode_Metrics/reward_group/style",
-  "Episode_Metrics/reward_group/regularization", "Episode_Metrics/reward_group/post_task",
-  "Episode_Metrics/contact/feet", "Episode_Metrics/contact/torso",
-]
-for t in tags:
-    sample(t)
-print()
-print("last iteration step seen:", ea.Scalars("Train/mean_episode_length")[-1].step)
-EOF
