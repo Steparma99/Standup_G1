@@ -172,10 +172,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # policy to solve four different getups (prone and side are much harder than
     # supine) was spreading the gradient too thin. Re-add poses ONE AT A TIME only
     # after the robot reliably stands and holds from supine.
-    cfg.events["reset_pose"].params["keyframes"] = (
-        SUPINE_KEYFRAME,
-        PRONE_KEYFRAME,
-    )
+    # v10: PRONE temporarily removed again — the v9 Pass 3 collapse traced to the
+    # beta-anchor bug (see the action-anchor block below), but to validate that
+    # fix on a single changed variable we go back to the known-stable SUPINE-only
+    # baseline first. Re-add PRONE as its own isolated pass once the fixed beta
+    # pipeline is confirmed stable.
+    cfg.events["reset_pose"].params["keyframes"] = (SUPINE_KEYFRAME,)
     if not _ADD_POSE_PERTURBATION:
         cfg.events["reset_pose"].params["joint_pos_range"] = {}
         cfg.events["reset_pose"].params["pose_range"] = {}
@@ -355,6 +357,18 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, LowPassJointPositionActionCfg)
     joint_pos_action.scale = 1.0
+    # v10 beta-anchor fix: anchor the residual/beta scheme on the standing HOME
+    # pose, NOT the entity's spawn default (= SUPINE, lying on the back). The
+    # entity must keep spawning supine, but mjlab derives default_joint_pos from
+    # the spawn keyframe, so without this override the beta curriculum's
+    # p^d = q_default + beta*a was squeezing the reachable PD targets toward
+    # LYING ON THE FLOOR as beta decayed 1.0 -> 0.25 — the exact opposite of the
+    # HoST intent (shrink action authority around a good standing reference).
+    # This was the mechanism behind the v9 Pass 3 collapse (beta and stable_hold
+    # declined in lockstep from it~3682). HOME_KEYFRAME is the same pose the
+    # posture rewards (post_standing_posture / post_upper_body_posture) already
+    # pull toward, so action authority and reward shaping now agree.
+    joint_pos_action.default_pos_override = dict(HOME_KEYFRAME.joint_pos)
     # Settling phase: hold the policy for the first _SETTLE_STEPS steps so the robot
     # accommodates onto the floor before it takes control.
     joint_pos_action.settle_steps = _SETTLE_STEPS

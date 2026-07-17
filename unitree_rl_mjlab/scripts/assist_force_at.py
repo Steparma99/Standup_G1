@@ -72,7 +72,8 @@ def main() -> None:
     vals = ea.Scalars(args.tag)
     # Pick the sample whose step is closest to the requested iteration.
     best = min(vals, key=lambda s: abs(s.step - args.iteration))
-    print(f"{best.value:.1f}")
+    # 4 significant digits: enough for beta (0.5168) without bloating force (99.34).
+    print(f"{best.value:.4g}")
 
 
 if __name__ == "__main__":

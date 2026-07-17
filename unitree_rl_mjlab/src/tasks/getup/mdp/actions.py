@@ -25,6 +25,7 @@ from mjlab.envs.mdp.actions.actions import (
 )
 from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 from mjlab.utils.lab_api.string import resolve_matching_names_values
+from mjlab.utils.string import resolve_expr
 
 from .events import _BETA_RESCALER_ATTR
 
@@ -49,7 +50,25 @@ class LowPassJointPositionAction(JointPositionAction):
         self._env = env
         self._alpha = float(cfg.alpha)
         self._settle_steps = int(cfg.settle_steps)
-        default = self._entity.data.default_joint_pos[:, self._target_ids].clone()
+        if cfg.default_pos_override is not None:
+            # Anchor the residual/beta scheme on an explicit pose instead of the
+            # entity's spawn pose. mjlab derives default_joint_pos from
+            # init_state.joint_pos, which for the get-up task is the SUPINE
+            # (lying) keyframe — with the beta rescaler, p^d = anchor + beta*a,
+            # so a decaying beta would squeeze the reachable targets toward
+            # lying on the floor instead of toward standing. The override lets
+            # the task anchor on the standing HOME pose (the paper's intent).
+            vals = resolve_expr(
+                cfg.default_pos_override, tuple(self._target_names), 0.0
+            )
+            default = (
+                torch.tensor(vals, dtype=torch.float, device=self.device)
+                .unsqueeze(0)
+                .repeat(self.num_envs, 1)
+            )
+            self._offset = default.clone()
+        else:
+            default = self._entity.data.default_joint_pos[:, self._target_ids].clone()
         self._default_target = default
         # Filter state tracks the realizable, clamped command to avoid windup.
         self._filtered_target = default.clone()
@@ -313,6 +332,14 @@ class LowPassJointPositionActionCfg(JointPositionActionCfg):
     """Number of env-steps at the start of each episode during which the policy does
     NOT control: the PD target is held at the current measured pose so the robot
     settles onto the floor (the integrator resolves spawn contacts). 0 disables it."""
+
+    default_pos_override: dict[str, float] | None = None
+    """Optional anchor pose for the residual/beta scheme: regex -> angle (rad),
+    same format as InitialStateCfg.joint_pos (unmatched joints anchor at 0.0).
+    When set, p^d = anchor + beta * a uses THIS pose instead of the entity's
+    spawn default_joint_pos — needed when the spawn pose (e.g. lying supine) is
+    not the pose the beta curriculum should shrink toward (standing). None keeps
+    the current spawn-pose behavior."""
 
     def build(self, env: "ManagerBasedRlEnv") -> LowPassJointPositionAction:
         return LowPassJointPositionAction(self, env)
