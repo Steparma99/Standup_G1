@@ -379,6 +379,21 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, LowPassJointPositionActionCfg)
     joint_pos_action.scale = 1.0
+    # Motion-smoothness governor (distinct from beta). alpha is the EMA weight on
+    # the freshly commanded PD target: q_cmd_t = alpha*desired + (1-alpha)*q_cmd_{t-1}.
+    # It controls how FAST the target moves, whereas beta controls how FAR the
+    # target can move from HOME. Lowering it 0.5 -> 0.25 roughly doubles the command
+    # time constant (~29ms -> ~70ms at the 50 Hz control rate) so the get-up motion
+    # is slower/less jerky. It does NOT shrink the reachable envelope (the EMA still
+    # converges to the same desired target), only the transient rate. Watch the next
+    # video: drop further toward 0.15 if still too fast, raise toward 0.35 if the
+    # robot reacts too sluggishly to catch falls.
+    joint_pos_action.alpha = 0.25
+    _override_alpha = os.environ.get("GETUP_ACTION_ALPHA")
+    if _override_alpha not in (None, ""):
+        joint_pos_action.alpha = float(_override_alpha)
+        print(f"[getup] action low-pass alpha overridden to {joint_pos_action.alpha:.3f} "
+              "(GETUP_ACTION_ALPHA)")
     # v10 beta-anchor fix: anchor the residual/beta scheme on the standing HOME
     # pose, NOT the entity's spawn default (= SUPINE, lying on the back). The
     # entity must keep spawning supine, but mjlab derives default_joint_pos from
@@ -575,9 +590,28 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         _initial_beta = (
             float(_train_beta) if _train_beta not in (None, "") else _BETA_INITIAL
         )
+        # GETUP_TRAIN_FREEZE_BETA: HARD-freeze the curriculum at `initial_beta`.
+        # Unlike the plain INITIAL_BETA override (which keeps annealing), this pins
+        # beta for the whole run: no decay, no re-ramp, and the population circuit
+        # breaker is disabled (pause_below=-1 can never trigger). Use on a resume
+        # once the anneal has reached a good plateau and you want PPO to reconverge
+        # on a STATIONARY problem instead of a moving action-authority target.
+        # Same effect the eval path applies below, but at a chosen train beta.
+        _freeze_beta_env = os.environ.get("GETUP_TRAIN_FREEZE_BETA")
+        _freeze_beta = _freeze_beta_env not in (None, "", "0", "false", "False")
         if _train_beta not in (None, ""):
+            _mode = "FROZEN, no anneal" if _freeze_beta else "continues annealing normally"
             print(f"[getup] TRAIN beta curriculum starting at {_initial_beta:.3f} "
-                  "(GETUP_TRAIN_INITIAL_BETA override, continues annealing normally)")
+                  f"(GETUP_TRAIN_INITIAL_BETA override, {_mode})")
+        elif _freeze_beta:
+            print(f"[getup] TRAIN beta curriculum FROZEN at {_initial_beta:.3f} "
+                  "(GETUP_TRAIN_FREEZE_BETA set; no decay/ramp/breaker)")
+        # When freezing, zero the decay + re-ramp steps and disable the breaker so
+        # nothing can move beta off `initial_beta`.
+        _decrement = 0.0 if _freeze_beta else _BETA_DECREMENT
+        _ramp_up_step = 0.0 if _freeze_beta else _BETA_RAMP_UP_STEP
+        _pause_below = -1.0 if _freeze_beta else _BETA_PAUSE_BELOW
+        _recovery_step = 0.0 if _freeze_beta else _BETA_RECOVERY_STEP
         cfg.events["beta_rescaler_curriculum"] = EventTermCfg(
             mode="step",
             func=BetaRescalerCurriculum,
@@ -585,18 +619,18 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot"),
                 "body_name": "torso_link",
                 "initial_beta": _initial_beta,
-                "decrement": _BETA_DECREMENT,
+                "decrement": _decrement,
                 "beta_min": _BETA_MIN,
                 "success_head_height": _BETA_SUCCESS_HEAD_HEIGHT,
                 "hold_steps": _BETA_HOLD_STEPS,
                 "ramp_up_after_failures": _BETA_RAMP_UP_AFTER_FAILURES,
-                "ramp_up_step": _BETA_RAMP_UP_STEP,
+                "ramp_up_step": _ramp_up_step,
                 "decay_cooldown_episodes": _BETA_DECAY_COOLDOWN_EPISODES,
                 # Fix 4 — population circuit breaker (see constants above).
                 "success_ema_alpha": _BETA_EMA_ALPHA,
-                "pause_below": _BETA_PAUSE_BELOW,
+                "pause_below": _pause_below,
                 "resume_above": _BETA_RESUME_ABOVE,
-                "recovery_step": _BETA_RECOVERY_STEP,
+                "recovery_step": _recovery_step,
                 # Feet-planted qualifier: beta only decays on a GENUINE stand
                 # (head height reached WHILE both feet planted), not a torso-lean
                 # spike — same qualifier as the assistance curriculum above.
