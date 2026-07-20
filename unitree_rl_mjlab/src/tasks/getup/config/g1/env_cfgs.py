@@ -471,6 +471,34 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # dial back to a moderate ~-4.0 in a follow-up (a full revert risks drift-back).
     cfg.rewards["post_upper_body_posture"].weight = -6.0
 
+    # Left/right arm posture diagnostic metrics (observation only — see metrics.py).
+    # Same target pose + per-joint weights as post_upper_body_posture above, just
+    # filtered to one side each, so the combined metric's L/R asymmetry (recurring
+    # across runs on alternating sides — see comments above) can be read directly
+    # instead of guessed at from video.
+    if "posture/left_arm_error" in cfg.metrics:
+        cfg.metrics["posture/left_arm_error"].params["target_joint_pos"] = dict(
+            HOME_KEYFRAME.joint_pos
+        )
+        cfg.metrics["posture/left_arm_error"].params["joint_weights"] = {
+            "left_shoulder_pitch_joint": 2.5,
+            "left_shoulder_roll_joint": 2.5,
+            "left_shoulder_yaw_joint": 0.5,
+            "left_elbow_joint": 2.5,
+            "left_wrist_.*": 0.3,
+        }
+    if "posture/right_arm_error" in cfg.metrics:
+        cfg.metrics["posture/right_arm_error"].params["target_joint_pos"] = dict(
+            HOME_KEYFRAME.joint_pos
+        )
+        cfg.metrics["posture/right_arm_error"].params["joint_weights"] = {
+            "right_shoulder_pitch_joint": 2.5,
+            "right_shoulder_roll_joint": 2.5,
+            "right_shoulder_yaw_joint": 0.5,
+            "right_elbow_joint": 2.5,
+            "right_wrist_.*": 0.3,
+        }
+
     # Full-body HOME pose L2 penalty (replaces exp-form standing_posture).
     # Direct quadratic penalty: constant gradient at any distance from HOME.
     # Leg joints highest weight (fix asymmetric stance / legs-one-over-other).
@@ -501,6 +529,22 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
+
+    # GETUP_ANTI_JUMP_RAMP_FROM: opt-in override, extends anti_jump_velocity's gate
+    # below its default floor (_POST_GATE_RAMP_FROM = H_STAGE1 = 0.45m). Below that
+    # height — the entire supine-to-crouch phase — there is otherwise ZERO velocity
+    # shaping anywhere in the reward stack; anti_jump_velocity is the only term that
+    # penalizes base speed during the rise at all. Unset by default (identical to prior
+    # behavior) — set for an ISOLATED test resume only, not on a live/in-progress run,
+    # since this is a genuine reward-shape change (same risk class as the alpha edit
+    # that caused the v13 resume shock) and needs a clean before/after comparison.
+    # Example: GETUP_ANTI_JUMP_RAMP_FROM=0.15 makes the dead-zone-above-1.5m/s penalty
+    # live almost from the floor instead of only from the crouch upward.
+    _anti_jump_ramp_from = os.environ.get("GETUP_ANTI_JUMP_RAMP_FROM")
+    if _anti_jump_ramp_from not in (None, ""):
+        cfg.rewards["anti_jump_velocity"].params["ramp_from"] = float(_anti_jump_ramp_from)
+        print(f"[getup] anti_jump_velocity ramp_from overridden to "
+              f"{float(_anti_jump_ramp_from):.3f} (GETUP_ANTI_JUMP_RAMP_FROM)")
 
     # Domain randomization: mass offset on torso, friction on feet.
     cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)

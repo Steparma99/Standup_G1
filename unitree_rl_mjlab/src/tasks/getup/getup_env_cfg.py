@@ -405,6 +405,17 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.torque_power_mean,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
+        # --- Left/right arm posture diagnostic (observation only, see metrics.py) ---
+        # target_joint_pos / joint_weights set per-robot in env_cfgs.py, mirroring the
+        # post_upper_body_posture reward's params pattern but filtered to one side.
+        "posture/left_arm_error": MetricsTermCfg(
+            func=mdp.left_arm_posture_error,
+            params={"target_joint_pos": {}, "joint_weights": {}},
+        ),
+        "posture/right_arm_error": MetricsTermCfg(
+            func=mdp.right_arm_posture_error,
+            params={"target_joint_pos": {}, "joint_weights": {}},
+        ),
         "target/clamp_fraction": MetricsTermCfg(
             func=mdp.joint_target_clamp_fraction,
             params={"action_name": "joint_pos", "asset_cfg": SceneEntityCfg("robot")},

@@ -1536,6 +1536,7 @@ def anti_jump_velocity(
     v_high: float = 1.5,
     cap: float = 3.0,
     height_threshold: float = H_STAGE2,
+    ramp_from: float = _POST_GATE_RAMP_FROM,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Anti ballistic-jump penalty: squared base-speed EXCESS above v_high [B,].
@@ -1543,15 +1544,22 @@ def anti_jump_velocity(
     Σ clamp(||v|| - v_high, 0, cap)² · gate. Returns a NON-NEGATIVE value — use with a
     NEGATIVE weight. Normal rise / stepping speeds sit under v_high (m/s) and are NOT
     penalised (dead zone below the threshold); only a launch is hit. Gated from
-    _POST_GATE_RAMP_FROM (0.45 m) upward so it stays active THROUGHOUT the rise — where
-    the jump-to-stand exploit lives — not just once standing. `cap` bounds the per-step
-    penalty so a fall/blow-up transient cannot explode the term.
+    `ramp_from` (default _POST_GATE_RAMP_FROM = 0.45 m) upward so it stays active
+    THROUGHOUT the rise — where the jump-to-stand exploit lives — not just once
+    standing. `cap` bounds the per-step penalty so a fall/blow-up transient cannot
+    explode the term.
+
+    `ramp_from` is exposed (rather than hardcoded to _POST_GATE_RAMP_FROM) so a caller
+    can extend the gate further down into the supine-to-crouch phase (h < 0.45m),
+    which otherwise has ZERO velocity shaping — this is the only term that penalizes
+    speed during the rise at all, so a lower ramp_from is the intended lever for
+    "policy launches too fast in the first phase" (see env_cfgs.py override / plan).
     """
     asset: Entity = env.scene[asset_cfg.name]
     speed = asset.data.root_link_lin_vel_b[:, :3].norm(dim=1)
     excess = torch.clamp(speed - v_high, min=0.0, max=cap)
     return excess.pow(2) * _post_gate(
-        asset, height_threshold, ramp_from=_POST_GATE_RAMP_FROM
+        asset, height_threshold, ramp_from=ramp_from
     )
 
 

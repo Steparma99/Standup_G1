@@ -39,6 +39,7 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
+from mjlab.utils.string import resolve_expr
 
 from .events import (
     _ASSIST_FORCE_ATTR,
@@ -568,6 +569,68 @@ def stage3_torque_saturation(
     ratio = tau.abs() / (limits.unsqueeze(0) + 1e-6)
     sat = (ratio > threshold).float().mean(dim=-1)
     return sat * mask
+
+
+# ---------------------------------------------------------------------------
+# Left/right arm posture diagnostic (observation only — no training effect).
+#
+# post_upper_body_posture (rewards.py) sums left+right arm error into a single
+# normalized metric, which can mask a persistent per-side asymmetry (the
+# arms-behind-the-back habit has recurred on alternating sides across runs — see
+# env_cfgs.py comments). These report each side's mean weighted squared error
+# from HOME separately so the asymmetry can be read directly from tfevents
+# instead of guessed at from video + blind weight changes.
+# ---------------------------------------------------------------------------
+_LEFT_ARM_POSTURE_CACHE = "_left_arm_posture_cache"
+_RIGHT_ARM_POSTURE_CACHE = "_right_arm_posture_cache"
+
+
+def _side_arm_posture_error(
+    env: "ManagerBasedRlEnv",
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    cache_attr: str,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = getattr(env, cache_attr, None)
+    if cache is None:
+        names = asset.joint_names
+        tgt = torch.tensor([resolve_expr(target_joint_pos or {}, names, 0.0)], device=env.device)
+        w = torch.tensor([resolve_expr(joint_weights or {}, names, 0.0)], device=env.device)
+        cache = {"tgt": tgt, "w": w, "n_w": w.sum().clamp(min=1.0)}
+        setattr(env, cache_attr, cache)
+    err = asset.data.joint_pos - cache["tgt"]  # [B, J]
+    return torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B], weighted mean
+
+
+def left_arm_posture_error(
+    env: "ManagerBasedRlEnv",
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Left-arm-only weighted mean squared error from HOME pose [B,].
+
+    Same normalization as post_upper_body_posture's `metric`, but `joint_weights`
+    is expected to be pre-filtered to `left_.*` joints only (set in env_cfgs.py) so
+    this reports the left side in isolation.
+    """
+    return _side_arm_posture_error(
+        env, target_joint_pos, joint_weights, _LEFT_ARM_POSTURE_CACHE, asset_cfg
+    )
+
+
+def right_arm_posture_error(
+    env: "ManagerBasedRlEnv",
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Right-arm-only weighted mean squared error from HOME pose [B,]. See left_arm_posture_error."""
+    return _side_arm_posture_error(
+        env, target_joint_pos, joint_weights, _RIGHT_ARM_POSTURE_CACHE, asset_cfg
+    )
 
 
 # ---------------------------------------------------------------------------
