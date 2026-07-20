@@ -50,6 +50,11 @@ class LowPassJointPositionAction(JointPositionAction):
         self._env = env
         self._alpha = float(cfg.alpha)
         self._settle_steps = int(cfg.settle_steps)
+        # Slew-rate limit: max absolute change in the commanded target per control
+        # step = max_rate [rad/s] * step_dt [s]. None disables it.
+        self._max_target_delta = (
+            None if cfg.max_rate is None else float(cfg.max_rate) * float(env.step_dt)
+        )
         if cfg.default_pos_override is not None:
             # Anchor the residual/beta scheme on an explicit pose instead of the
             # entity's spawn pose. mjlab derives default_joint_pos from
@@ -174,6 +179,19 @@ class LowPassJointPositionAction(JointPositionAction):
             self._alpha * desired_target
             + (1.0 - self._alpha) * self._filtered_target
         )
+        # Slew-rate limit (optional): bound the per-step change of the commanded
+        # target to ±max_target_delta rad/joint relative to the previous realizable
+        # command (self._filtered_target still holds the prior step's value here).
+        # Applied after the EMA so it caps ABSOLUTE speed — which the EMA, being a
+        # fraction-of-distance filter, cannot — and before the joint-limit clamp so
+        # the anti-windup filter state stays on the realizable command.
+        if self._max_target_delta is not None:
+            delta = torch.clamp(
+                ema_target - self._filtered_target,
+                -self._max_target_delta,
+                self._max_target_delta,
+            )
+            ema_target = self._filtered_target + delta
         self._filtered_target_unclamped = ema_target
         self._processed_actions = self._clamp_to_joint_limits(ema_target)
         # Anti-windup: keep the filter state on the realizable command.
@@ -327,6 +345,17 @@ class LowPassJointPositionActionCfg(JointPositionActionCfg):
 
     alpha: float = 0.5
     """EMA coefficient in (0, 1]. Lower = more smoothing. 1.0 disables the filter."""
+
+    max_rate: float | None = None
+    """Optional per-joint slew-rate limit on the commanded PD target, in rad/s.
+    Applied AFTER the EMA blend (and before the joint-limit clamp): the change in
+    the filtered target from one control step to the next is clamped to
+    ±(max_rate * step_dt) rad per joint. Unlike `alpha` — an EMA that moves a fixed
+    FRACTION of the remaining distance-to-target each step, so its absolute step
+    size is large when the target is far (early in the rise) — this bounds the
+    ABSOLUTE speed of the commanded motion regardless of distance. None disables it
+    (identical to the EMA-only behavior). Use to slow the fast early-rise phase that
+    a low alpha cannot reach."""
 
     settle_steps: int = 0
     """Number of env-steps at the start of each episode during which the policy does

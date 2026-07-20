@@ -394,6 +394,19 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         joint_pos_action.alpha = float(_override_alpha)
         print(f"[getup] action low-pass alpha overridden to {joint_pos_action.alpha:.3f} "
               "(GETUP_ACTION_ALPHA)")
+    # Slew-rate limit (rad/s) on the commanded target — bounds ABSOLUTE motion speed,
+    # which alpha (a fraction-of-distance EMA) structurally cannot: the biggest joint
+    # travel early in the rise stays fast even at low alpha, and anti_jump_velocity
+    # confirmed base LINEAR speed is never the active constraint (stayed ~0 with its
+    # gate wide open), so per-joint TARGET slew is the remaining lever for the
+    # "too fast during the first part of the rise" symptom. Opt-in via env var,
+    # default unset = no rate limit (identical to EMA-only behavior). Isolated test
+    # knob — set only on a dedicated test resume, not bundled with other changes.
+    _override_max_rate = os.environ.get("GETUP_ACTION_MAX_RATE")
+    if _override_max_rate not in (None, ""):
+        joint_pos_action.max_rate = float(_override_max_rate)
+        print(f"[getup] action slew-rate limit set to {joint_pos_action.max_rate:.3f} rad/s "
+              "(GETUP_ACTION_MAX_RATE)")
     # v10 beta-anchor fix: anchor the residual/beta scheme on the standing HOME
     # pose, NOT the entity's spawn default (= SUPINE, lying on the back). The
     # entity must keep spawning supine, but mjlab derives default_joint_pos from
