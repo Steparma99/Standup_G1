@@ -21,7 +21,9 @@ EXTRA_ARGS=()
 if [ $# -lt 1 ]; then
   echo "Usage: bash train.sh <task> [--gpu N] [extra args]"
   echo ""
-  echo "  --gpu N    Run on a specific GPU index (e.g. --gpu 1)"
+  echo "  Default (no --gpu): uses ALL GPUs listed in hardware_config.yaml's"
+  echo "  cuda.gpu_ids (multi-GPU DDP via torchrunx when more than one)."
+  echo "  --gpu N    Restrict this run to a single GPU index (e.g. --gpu 1)"
   echo ""
   echo "Available tasks (run from mjlab dir):"
   python "$MJLAB_DIR/scripts/list_envs.py" 2>/dev/null || true

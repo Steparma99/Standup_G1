@@ -28,11 +28,15 @@
 #     --beta-kill-iters N   iterazioni consecutive al floor prima del kill (default 75)
 #     --beta-kill-env NAME  conda env per il watcher (default unitree_rl_cuda)
 #
-# Run CONCORRENTI: i PID file sono per-run (.training_<run>.pid /
-# .autovideo_<run>.pid), quindi si possono lanciare più run con NOMI DIVERSI
-# in parallelo, ognuno sulla propria GPU (--gpu N è consumato da train.sh):
-#   bash launch.sh Unitree-G1-GetUp run_a --agent.max-iterations=2000
+# GPU selection: hardware_config.yaml's cuda.gpu_ids defaults to [0, 1] — a
+# bare launch uses BOTH GPUs as one multi-GPU DDP run (torchrunx, one process
+# per GPU, gradients synced — NOT two independent runs). Pass --gpu N (consumato
+# da train.sh) to restrict a launch to a single physical GPU instead, e.g. to
+# run two SEPARATE single-GPU experiments concurrently on named runs:
+#   bash launch.sh Unitree-G1-GetUp run_a --gpu 0 --agent.max-iterations=2000
 #   bash launch.sh Unitree-G1-GetUp run_b --gpu 1 --video-device cuda:1 ...
+# (i PID file sono per-run: .training_<run>.pid / .autovideo_<run>.pid, quindi
+# run concorrenti con NOMI DIVERSI non si pestano i piedi)
 # kill.sh <run_name> killa un run specifico; kill.sh senza argomenti killa tutto.
 # ============================================================
 set -euo pipefail

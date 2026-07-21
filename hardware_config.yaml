@@ -22,7 +22,16 @@ cpu:
 
 # --- NVIDIA CUDA settings ---
 cuda:
-  gpu_ids: [0]          # GPU indices (e.g. [0, 1] for multi-GPU)
-  num_envs: 4096        # Full parallel envs on GPU
+  # Default: use BOTH GPUs (true multi-GPU DDP via torchrunx — one training
+  # process per GPU, each simulating num_envs and syncing gradients, not two
+  # independent runs). Override to a single GPU per launch with `--gpu N`
+  # (e.g. `bash train.sh Unitree-G1-GetUp --gpu 0`, or via launch.sh:
+  # `bash launch.sh Unitree-G1-GetUp my_run --gpu 1`) — useful for running two
+  # separate single-GPU experiments concurrently instead of one 2-GPU run.
+  gpu_ids: [0, 1]       # GPU indices (physical IDs, or indices into
+                        # CUDA_VISIBLE_DEVICES if already restricted)
+  num_envs: 4096        # Full parallel envs PER GPU (not split/shared — each
+                         # rank simulates this many; total sim envs = num_envs *
+                         # num_gpus)
   mujoco_gl: "egl"      # NVIDIA EGL offscreen renderer
   torch_device: "cuda"
