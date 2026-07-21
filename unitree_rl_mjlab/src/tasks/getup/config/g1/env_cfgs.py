@@ -173,12 +173,15 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # contact = a missing reward/force signal. Raised with matching njmax headroom
     # (~4 constraint rows per contact, pyramidal cone). Watch the run for overflow
     # warnings: lower if memory-bound, raise further if they appear.
-    # v16: raised 80/380 -> 130/650 — with pose perturbation + the PRONE keyframe
-    # the smoke test logged "nefc overflow - please increase njmax to 457"; more
-    # varied sprawls produce more simultaneous contacts. Sized with ~40% headroom
-    # over the worst observed need (~4 constraint rows per contact, pyramidal cone).
-    cfg.sim.nconmax = 130
-    cfg.sim.njmax = 650
+    # v16: raised from 80/380 — with pose perturbation + the PRONE keyframe the
+    # smoke test logged "nefc overflow - please increase njmax to 457"; more
+    # varied sprawls produce more simultaneous contacts. These buffers are
+    # allocated PER ENV, so at num_envs=4096 a 130/650 first attempt (~40%
+    # headroom) OOM'd the GPU — tightened to ~5% headroom over the observed
+    # 457 need instead. Raise again if overflow warnings reappear, but check
+    # GPU memory (nvidia-smi) / lower --env.scene.num-envs first if it OOMs.
+    cfg.sim.nconmax = 100
+    cfg.sim.njmax = 480
 
     # Robot spawns from SUPINE by default; the reset event below overrides the
     # pose every episode by sampling from the reference set. Uses the HoST PD
