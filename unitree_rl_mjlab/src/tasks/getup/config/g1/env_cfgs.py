@@ -44,8 +44,12 @@ _DR_ACTION_DELAY_ENABLE   = False    # P1.6: action lag buffer per env
 # (SEATED temporarily removed — see the reset keyframes below); this flag only
 # controls whether random noise is added around each pose. Set to True once the
 # policy reliably stands from all poses.
+# v16: enabled — the supine getup is solid (stable_hold ~0.72 at v15/it11000), so
+# the fixed-pose baseline has served its purpose. The default noise ranges from
+# getup_env_cfg.py now apply (joint ±0.5 rad limbs / ±0.3 waist, root roll/pitch
+# ±0.1, full random yaw).
 # ---------------------------------------------------------------------------
-_ADD_POSE_PERTURBATION = False
+_ADD_POSE_PERTURBATION = True
 
 # ---------------------------------------------------------------------------
 # Assistance curriculum (HoST-style decaying upward support force on the torso).
@@ -169,8 +173,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # contact = a missing reward/force signal. Raised with matching njmax headroom
     # (~4 constraint rows per contact, pyramidal cone). Watch the run for overflow
     # warnings: lower if memory-bound, raise further if they appear.
-    cfg.sim.nconmax = 80
-    cfg.sim.njmax = 380
+    # v16: raised 80/380 -> 130/650 — with pose perturbation + the PRONE keyframe
+    # the smoke test logged "nefc overflow - please increase njmax to 457"; more
+    # varied sprawls produce more simultaneous contacts. Sized with ~40% headroom
+    # over the worst observed need (~4 constraint rows per contact, pyramidal cone).
+    cfg.sim.nconmax = 130
+    cfg.sim.njmax = 650
 
     # Robot spawns from SUPINE by default; the reset event below overrides the
     # pose every episode by sampling from the reference set. Uses the HoST PD
@@ -199,7 +207,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # fix on a single changed variable we go back to the known-stable SUPINE-only
     # baseline first. Re-add PRONE as its own isolated pass once the fixed beta
     # pipeline is confirmed stable.
-    cfg.events["reset_pose"].params["keyframes"] = (SUPINE_KEYFRAME,)
+    # v16: PRONE re-added — the beta-anchor bug that sank the previous PRONE
+    # attempts was fixed in v10 (HOME anchor) and the supine getup is now stable
+    # with beta frozen at 0.72, so this is the planned isolated re-introduction.
+    # SIDE_LEFT / SIDE_RIGHT stay out until SUPINE+PRONE is validated.
+    cfg.events["reset_pose"].params["keyframes"] = (SUPINE_KEYFRAME, PRONE_KEYFRAME)
     if not _ADD_POSE_PERTURBATION:
         cfg.events["reset_pose"].params["joint_pos_range"] = {}
         cfg.events["reset_pose"].params["pose_range"] = {}
@@ -388,7 +400,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # converges to the same desired target), only the transient rate. Watch the next
     # video: drop further toward 0.15 if still too fast, raise toward 0.35 if the
     # robot reacts too sluggishly to catch falls.
-    joint_pos_action.alpha = 0.25
+    # v16: 0.25 -> 0.15 — the v15 video was still too fast; command time constant
+    # grows ~70ms -> ~123ms at 50 Hz. Raise back toward 0.25 if the robot can no
+    # longer catch itself during the rise.
+    joint_pos_action.alpha = 0.15
     _override_alpha = os.environ.get("GETUP_ACTION_ALPHA")
     if _override_alpha not in (None, ""):
         joint_pos_action.alpha = float(_override_alpha)
@@ -399,13 +414,17 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # travel early in the rise stays fast even at low alpha, and anti_jump_velocity
     # confirmed base LINEAR speed is never the active constraint (stayed ~0 with its
     # gate wide open), so per-joint TARGET slew is the remaining lever for the
-    # "too fast during the first part of the rise" symptom. Opt-in via env var,
-    # default unset = no rate limit (identical to EMA-only behavior). Isolated test
-    # knob — set only on a dedicated test resume, not bundled with other changes.
+    # "too fast during the first part of the rise" symptom.
+    # v16: promoted from opt-in test knob to a BAKED-IN default (2.5 rad/s) after
+    # the v15 slew-rate test confirmed training stays healthy with the limiter on
+    # — the limiter is part of the trained dynamics, never a deploy-only filter.
+    # GETUP_ACTION_MAX_RATE still overrides for tuning (set 0 to get "no limit"
+    # back via a huge value, e.g. 1e6).
+    joint_pos_action.max_rate = 2.5
     _override_max_rate = os.environ.get("GETUP_ACTION_MAX_RATE")
     if _override_max_rate not in (None, ""):
         joint_pos_action.max_rate = float(_override_max_rate)
-        print(f"[getup] action slew-rate limit set to {joint_pos_action.max_rate:.3f} rad/s "
+        print(f"[getup] action slew-rate limit overridden to {joint_pos_action.max_rate:.3f} rad/s "
               "(GETUP_ACTION_MAX_RATE)")
     # v10 beta-anchor fix: anchor the residual/beta scheme on the standing HOME
     # pose, NOT the entity's spawn default (= SUPINE, lying on the back). The
@@ -469,7 +488,9 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_shoulder_yaw_joint": 0.5,
         ".*_elbow_joint": 2.5,
         ".*_wrist_.*": 0.3,
-        "waist_.*": 0.5,
+        # v16: 0.5 -> 1.5 — the final pose shows a torso-vs-legs twist (waist_yaw);
+        # at 0.5 the waist barely registered in the normalized mean vs the 2.5 arms.
+        "waist_.*": 1.5,
     }
     # v9 Pass 2 (arm-weight bump): after Pass 1 (symmetric weights + assist force
     # decayed to ~0) the arm still trailed and this term kept WORSENING through the
@@ -527,8 +548,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_knee_joint": 3.0,
         ".*_ankle_pitch_joint": 2.0,
         ".*_ankle_roll_joint": 1.0,
-        # Waist — fix crooked torso
-        "waist_.*": 2.0,
+        # Waist — fix crooked torso. v16: 2.0 -> 4.0, now the TOP weight — the
+        # residual final-pose defect is the torso not rotated in line with the
+        # legs (waist_yaw twist), so the waist gradient must not be diluted by
+        # the (already converged) high-weight legs in this normalized mean.
+        "waist_.*": 4.0,
         # Arms — raised 1.5->2.5 / wrists 0.5->1.5 so the arm gradient is not drowned
         # out by the high-weight legs in this normalised metric (fixes arms trailing
         # behind the trunk). HOME sets shoulder_pitch/roll + elbow targets.
