@@ -571,6 +571,31 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_wrist_.*": 1.5,
     }
 
+    # v16: left/right joint-angle MIRROR symmetry (post_bilateral_symmetry) — see
+    # rewards.py docstring for why this is needed alongside the two HOME-tracking
+    # terms above. Keys are joint FAMILY names (no left_/right_ prefix, no regex —
+    # the function resolves both sides + the correct mirror sign itself).
+    # Arms weighted highest: this is the direct fix for "left hand stuck near the
+    # hip while the right arm is fine" (or vice versa) recurring across runs even
+    # with symmetric HOME-tracking weights — a MEAN error lets one good arm mask
+    # one bad arm, this term cannot be fooled that way. Legs/waist included at
+    # lower weight for full-body symmetry, but they were already converging fine.
+    cfg.rewards["post_bilateral_symmetry"].params["joint_weights"] = {
+        "shoulder_pitch": 3.0,
+        "shoulder_roll": 3.0,
+        "shoulder_yaw": 1.0,
+        "elbow": 3.0,
+        "wrist_roll": 0.5,
+        "wrist_pitch": 0.5,
+        "wrist_yaw": 0.5,
+        "hip_pitch": 1.0,
+        "hip_roll": 1.0,
+        "hip_yaw": 1.0,
+        "knee": 1.0,
+        "ankle_pitch": 0.5,
+        "ankle_roll": 0.5,
+    }
+
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
 

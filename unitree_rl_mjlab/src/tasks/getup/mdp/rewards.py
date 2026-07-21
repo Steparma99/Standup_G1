@@ -1663,6 +1663,92 @@ def post_upper_body_posture(
     )
 
 
+# Left/right mirror-sign convention, derived from the MJCF joint axes and the
+# sagittal (left-right) mirror plane: a rotation about the axis PERPENDICULAR
+# to the mirror plane keeps its sense under mirroring (symmetric, q_left ==
+# q_right); a rotation about an axis LYING IN the mirror plane has its sense
+# REVERSED (anti-symmetric, q_left == -q_right). In this MJCF, pitch joints use
+# axis (0,1,0) (perpendicular to the sagittal plane) and roll/yaw joints use
+# axis (1,0,0) / (0,0,1) (both in the sagittal plane) — confirmed empirically
+# against the two pairs with asymmetric (non-zero-centered) joint ranges:
+# shoulder_roll [-1.5882,2.2515]/[-2.2515,1.5882] and hip_roll
+# [-0.5236,2.9671]/[-2.9671,0.5236] both negate-and-swap between sides, exactly
+# what the anti-symmetric rule predicts. +1 = symmetric, -1 = anti-symmetric.
+_MIRROR_SIGN: dict[str, float] = {
+    "hip_pitch": 1.0, "hip_roll": -1.0, "hip_yaw": -1.0,
+    "knee": 1.0,
+    "ankle_pitch": 1.0, "ankle_roll": -1.0,
+    "shoulder_pitch": 1.0, "shoulder_roll": -1.0, "shoulder_yaw": -1.0,
+    "elbow": 1.0,
+    "wrist_roll": -1.0, "wrist_pitch": 1.0, "wrist_yaw": -1.0,
+}
+_BILATERAL_SYMMETRY_CACHE_ATTR = "_bilateral_symmetry_cache"
+
+
+def post_bilateral_symmetry(
+    env: ManagerBasedRlEnv,
+    joint_weights: dict[str, float],
+    scale: float = 1.0,
+    kp: float = 4.0,
+    height_threshold: float = H_STAGE2,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward left/right joint-angle mirror symmetry directly: exp(-kp·metric)·gate [B,].
+
+    Unlike post_upper_body_posture / post_standing_posture (which pull each joint
+    toward an absolute HOME target), this compares left and right joints to EACH
+    OTHER. That closes a specific gap the HOME-tracking terms cannot: a MEAN error
+    over many joints lets one converged arm offset one lagging arm, and the mean can
+    look fine while one side is visibly wrong. This term cannot be fooled that way —
+    it is exactly 0 (best) only when both sides genuinely match.
+
+    ``joint_weights`` keys are joint FAMILY names (e.g. "shoulder_pitch", "elbow",
+    "hip_roll" — no left_/right_ prefix, no regex) that must be present in
+    `_MIRROR_SIGN`; the value is that pair's weight. For each family, error is
+    `q_left - sign·q_right` where sign is +1 (pitch joints: same sense under
+    mirroring) or -1 (roll/yaw joints: reversed sense under mirroring — see
+    `_MIRROR_SIGN`). metric = weighted MEAN of squared errors across the selected
+    pairs, normalized by total weight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = getattr(env, _BILATERAL_SYMMETRY_CACHE_ATTR, None)
+    if cache is None:
+        names = asset.joint_names
+        name_to_id = {n: i for i, n in enumerate(names)}
+        left_ids, right_ids, signs, weights = [], [], [], []
+        for family, w in (joint_weights or {}).items():
+            if family not in _MIRROR_SIGN:
+                raise ValueError(
+                    f"post_bilateral_symmetry: unknown joint family '{family}' — "
+                    f"must be one of {sorted(_MIRROR_SIGN)}"
+                )
+            left_name, right_name = f"left_{family}_joint", f"right_{family}_joint"
+            if left_name not in name_to_id or right_name not in name_to_id:
+                raise ValueError(
+                    f"post_bilateral_symmetry: joint pair '{left_name}'/'{right_name}' "
+                    "not found on the asset"
+                )
+            left_ids.append(name_to_id[left_name])
+            right_ids.append(name_to_id[right_name])
+            signs.append(_MIRROR_SIGN[family])
+            weights.append(w)
+        cache = {
+            "left_ids": torch.tensor(left_ids, dtype=torch.long, device=env.device),
+            "right_ids": torch.tensor(right_ids, dtype=torch.long, device=env.device),
+            "signs": torch.tensor(signs, device=env.device),
+            "w": torch.tensor(weights, device=env.device),
+            "n_w": torch.tensor(weights, device=env.device).sum().clamp(min=1e-6),
+        }
+        setattr(env, _BILATERAL_SYMMETRY_CACHE_ATTR, cache)
+    q = asset.data.joint_pos
+    err = q[:, cache["left_ids"]] - cache["signs"] * q[:, cache["right_ids"]]  # [B, P]
+    metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B]
+    return scale * torch.exp(-kp * metric) * _post_gate(
+        asset, height_threshold, ramp_from=ramp_from
+    )
+
+
 def post_feet_parallel(
     env: ManagerBasedRlEnv,
     scale: float = 20.0,

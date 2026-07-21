@@ -1029,6 +1029,24 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "pelvis_height_threshold": 0.65, "kp": 4.0,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
+        # Left/right joint-angle mirror symmetry (v16). Complements
+        # post_upper_body_posture / post_standing_posture, which pull each joint
+        # toward an absolute HOME target via a MEAN error across many joints — a
+        # mean lets one converged arm offset one lagging arm, which is exactly the
+        # "left hand near the hip while the right arm is fine" pattern observed
+        # across multiple runs even after HOME-tracking weights were symmetrized.
+        # This term instead compares left and right joints directly to EACH OTHER
+        # (sign convention per joint family: pitch joints are symmetric q_L=q_R,
+        # roll/yaw joints are anti-symmetric q_L=-q_R — derived from the MJCF joint
+        # axes vs. the sagittal mirror plane, see mdp.rewards._MIRROR_SIGN), so it
+        # cannot be fooled by one good side masking one bad side in the mean.
+        # joint_weights set per-robot in env_cfgs.py.
+        "post_bilateral_symmetry": RewardTermCfg(
+            func=mdp.post_bilateral_symmetry, weight=6.0,
+            params={"joint_weights": {}, "scale": 1.0, "kp": 4.0,
+                    "height_threshold": 0.65, "ramp_from": 0.45,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
         # Both-feet grounded reward: 0.5 for one foot, 1.0 for both. Directly penalizes
         # the one-foot balancing behaviour. site_names set per-robot in env_cfgs.py.
         # Gate triggers earlier (h=0.50m) than the other post-task terms (0.65m), so
