@@ -173,15 +173,19 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # contact = a missing reward/force signal. Raised with matching njmax headroom
     # (~4 constraint rows per contact, pyramidal cone). Watch the run for overflow
     # warnings: lower if memory-bound, raise further if they appear.
-    # v16: raised from 80/380 — with pose perturbation + the PRONE keyframe the
-    # smoke test logged "nefc overflow - please increase njmax to 457"; more
-    # varied sprawls produce more simultaneous contacts. These buffers are
-    # allocated PER ENV, so at num_envs=4096 a 130/650 first attempt (~40%
-    # headroom) OOM'd the GPU — tightened to ~5% headroom over the observed
-    # 457 need instead. Raise again if overflow warnings reappear, but check
-    # GPU memory (nvidia-smi) / lower --env.scene.num-envs first if it OOMs.
-    cfg.sim.nconmax = 100
-    cfg.sim.njmax = 480
+    # v16: raised from 80/380 — with pose perturbation + the PRONE keyframe, an
+    # 8-env smoke test undersold the real tail: a full 4096-env training run
+    # logged sustained overflow up to njmax=720 (not a one-off spike — dozens of
+    # occurrences in the 480-720 range), meaning contacts were being dropped on
+    # essentially every iteration. Sized with real headroom over the observed
+    # 720 peak this time. These buffers are allocated PER ENV, so this increase
+    # (480->900, ~1.9x) will very likely OOM again at num_envs=4096 (130/650 —
+    # a smaller 1.35x increase — already OOM'd once); LOWER --env.scene.num-envs
+    # (e.g. 2048) on the next launch to compensate. Raise further only if fresh
+    # overflow warnings appear at the new size; check GPU memory (nvidia-smi) /
+    # lower num-envs further first if it OOMs again.
+    cfg.sim.nconmax = 190
+    cfg.sim.njmax = 900
 
     # Robot spawns from SUPINE by default; the reset event below overrides the
     # pose every episode by sampling from the reference set. Uses the HoST PD
