@@ -80,10 +80,10 @@ _ASSIST_DECAY_COOLDOWN_EPISODES = 3
 _ASSIST_RAMP_UP_AFTER_FAILURES = 8       # was 20 — recover support faster so the
                                          # servo tracks true competence, not a ratchet
 _ASSIST_RAMP_UP_STEP_N         = 10.0
-_ASSIST_UNACTUATED_STEPS       = 30      # no assist force during the unactuated/settle
-                                         # window (HoST gates pull_force by
-                                         # real_episode_length_buf > unactuated_time=30,
-                                         # i.e. 30 steps = 0.6 s @ 50 Hz). Matches _SETTLE_STEPS.
+_ASSIST_UNACTUATED_STEPS       = 40      # no assist force during the unactuated/settle
+                                         # window (HoST uses unactuated_time=30 = 0.6 s
+                                         # @ 50 Hz; v18 extended to 40 = 0.8 s alongside
+                                         # _SETTLE_STEPS). Matches _SETTLE_STEPS.
 
 # ---------------------------------------------------------------------------
 # Action-rescaler (beta) curriculum (HoST). beta is the action scale in
@@ -158,7 +158,11 @@ _RESET_FALL_HEIGHT = 0.03
 # the very spawn-instability this window is meant to absorb. We also keep hold-current
 # instead of HoST's zero-action, because here zero action targets default_joint_pos,
 # which is far from the supine spawn and would yank the robot up instead of settling.)
-_SETTLE_STEPS = 30
+# v18: 30 -> 40 (0.6 s -> 0.8 s) — with _ADD_POSE_PERTURBATION + PRONE the perturbed
+# spawn poses were sometimes still visibly moving toward rest when the policy took
+# over. Keep _ASSIST_UNACTUATED_STEPS (above) and getup_env_cfg._UNACTUATED_STEPS
+# (termination grace windows) matched to this value.
+_SETTLE_STEPS = 40
 _MASK_STEPS = 10
 
 

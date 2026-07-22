@@ -56,8 +56,10 @@ _HEAD_IMPACT_TERMINATION_THRESHOLD = 1200.0
 _GRACE_STEPS = 8
 
 # HoST unactuated_time: the DOF-velocity / base-velocity guards arm only AFTER this
-# window (30 steps = 0.6 s @ 50 Hz, matching g1_config_ground.py unactuated_timesteps=30).
-_UNACTUATED_STEPS = 30
+# window (HoST g1_config_ground.py uses unactuated_timesteps=30 = 0.6 s @ 50 Hz;
+# v18 extended to 40 = 0.8 s, matched to config/g1/env_cfgs._SETTLE_STEPS so the
+# guards never arm while the robot is still passively settling).
+_UNACTUATED_STEPS = 40
 
 _FORBIDDEN_ACTOR_TERMS = {
     "base_height",
