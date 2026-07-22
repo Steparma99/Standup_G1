@@ -410,7 +410,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # v16: 0.25 -> 0.15 — the v15 video was still too fast; command time constant
     # grows ~70ms -> ~123ms at 50 Hz. Raise back toward 0.25 if the robot can no
     # longer catch itself during the rise.
-    joint_pos_action.alpha = 0.15
+    # v17: 0.15 -> 0.12 — passB video still not smooth (note: that run also ran
+    # with the slew cap loosened to 3.0 via env var, so re-judge smoothness with
+    # BOTH this alpha and the default 2.5 rad/s cap before lowering further).
+    # Time constant ~123ms -> ~156ms at 50 Hz.
+    joint_pos_action.alpha = 0.12
     _override_alpha = os.environ.get("GETUP_ACTION_ALPHA")
     if _override_alpha not in (None, ""):
         joint_pos_action.alpha = float(_override_alpha)
