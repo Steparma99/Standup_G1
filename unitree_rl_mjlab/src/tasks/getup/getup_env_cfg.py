@@ -57,9 +57,9 @@ _GRACE_STEPS = 8
 
 # HoST unactuated_time: the DOF-velocity / base-velocity guards arm only AFTER this
 # window (HoST g1_config_ground.py uses unactuated_timesteps=30 = 0.6 s @ 50 Hz;
-# v18 extended to 40 = 0.8 s, matched to config/g1/env_cfgs._SETTLE_STEPS so the
-# guards never arm while the robot is still passively settling).
-_UNACTUATED_STEPS = 40
+# v18 extended 30->40->60 = 1.2 s, matched to config/g1/env_cfgs._SETTLE_STEPS so
+# the guards never arm while the robot is still passively settling).
+_UNACTUATED_STEPS = 60
 
 _FORBIDDEN_ACTOR_TERMS = {
     "base_height",

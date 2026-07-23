@@ -80,10 +80,10 @@ _ASSIST_DECAY_COOLDOWN_EPISODES = 3
 _ASSIST_RAMP_UP_AFTER_FAILURES = 8       # was 20 — recover support faster so the
                                          # servo tracks true competence, not a ratchet
 _ASSIST_RAMP_UP_STEP_N         = 10.0
-_ASSIST_UNACTUATED_STEPS       = 40      # no assist force during the unactuated/settle
+_ASSIST_UNACTUATED_STEPS       = 60      # no assist force during the unactuated/settle
                                          # window (HoST uses unactuated_time=30 = 0.6 s
-                                         # @ 50 Hz; v18 extended to 40 = 0.8 s alongside
-                                         # _SETTLE_STEPS). Matches _SETTLE_STEPS.
+                                         # @ 50 Hz; v18 extended 30->40->60 = 1.2 s
+                                         # alongside _SETTLE_STEPS). Matches _SETTLE_STEPS.
 
 # ---------------------------------------------------------------------------
 # Action-rescaler (beta) curriculum (HoST). beta is the action scale in
@@ -162,8 +162,29 @@ _RESET_FALL_HEIGHT = 0.03
 # spawn poses were sometimes still visibly moving toward rest when the policy took
 # over. Keep _ASSIST_UNACTUATED_STEPS (above) and getup_env_cfg._UNACTUATED_STEPS
 # (termination grace windows) matched to this value.
-_SETTLE_STEPS = 40
+# v18b: 40 -> 60 (0.8 s -> 1.2 s) — 40 still showed spawns visibly settling when the
+# policy took over. Note velocity is force-zeroed exactly at window end
+# (events.settle_zero_velocity), so if 60 still looks unsettled the culprit is
+# contact/pose convergence or the velocity-snap discontinuity itself, not window
+# length — investigate there instead of raising this further.
+_SETTLE_STEPS = 60
 _MASK_STEPS = 10
+
+# ---------------------------------------------------------------------------
+# Liftoff phase (v18b): for the first _LIFTOFF_STEPS right after the settle window
+# the action filter runs with a REDUCED alpha and slew cap — the initial rise (leg
+# drive / torso lift) is the fastest, jerkiest part of the motion and a flat
+# whole-episode alpha/max_rate low enough to tame it would make the whole stand
+# sluggish. Values then blend linearly back to the nominal alpha/max_rate over
+# _LIFTOFF_RAMP_STEPS (a hard step back would itself be a jerk seam). Permanent
+# structural behavior (part of the trained dynamics), not a training curriculum.
+# alpha time constant at 50 Hz: nominal 0.12 -> ~156 ms; liftoff 0.06 -> ~330 ms.
+# ---------------------------------------------------------------------------
+_LIFTOFF_STEPS      = 30    # 0.6 s of slow, deliberate initial rise
+_LIFTOFF_ALPHA      = 0.06  # half the nominal 0.12
+_LIFTOFF_MAX_RATE   = 1.25  # rad/s, half the nominal 2.5 — still enough authority
+                            # to drive the rise without stalling the liftoff
+_LIFTOFF_RAMP_STEPS = 20    # 0.4 s linear blend back to nominal values
 
 
 def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -441,6 +462,28 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         joint_pos_action.max_rate = float(_override_max_rate)
         print(f"[getup] action slew-rate limit overridden to {joint_pos_action.max_rate:.3f} rad/s "
               "(GETUP_ACTION_MAX_RATE)")
+    # Liftoff phase (v18b): slower alpha/slew for the first _LIFTOFF_STEPS after the
+    # settle window, blending back to nominal over _LIFTOFF_RAMP_STEPS. See the
+    # _LIFTOFF_* constants above for rationale/values.
+    joint_pos_action.liftoff_steps = _LIFTOFF_STEPS
+    joint_pos_action.liftoff_alpha = _LIFTOFF_ALPHA
+    joint_pos_action.liftoff_max_rate = _LIFTOFF_MAX_RATE
+    joint_pos_action.liftoff_ramp_steps = _LIFTOFF_RAMP_STEPS
+    _override_liftoff_steps = os.environ.get("GETUP_ACTION_LIFTOFF_STEPS")
+    if _override_liftoff_steps not in (None, ""):
+        joint_pos_action.liftoff_steps = int(_override_liftoff_steps)
+        print(f"[getup] liftoff steps overridden to {joint_pos_action.liftoff_steps} "
+              "(GETUP_ACTION_LIFTOFF_STEPS; 0 disables the liftoff phase)")
+    _override_liftoff_alpha = os.environ.get("GETUP_ACTION_LIFTOFF_ALPHA")
+    if _override_liftoff_alpha not in (None, ""):
+        joint_pos_action.liftoff_alpha = float(_override_liftoff_alpha)
+        print(f"[getup] liftoff alpha overridden to {joint_pos_action.liftoff_alpha:.3f} "
+              "(GETUP_ACTION_LIFTOFF_ALPHA)")
+    _override_liftoff_max_rate = os.environ.get("GETUP_ACTION_LIFTOFF_MAX_RATE")
+    if _override_liftoff_max_rate not in (None, ""):
+        joint_pos_action.liftoff_max_rate = float(_override_liftoff_max_rate)
+        print(f"[getup] liftoff slew-rate overridden to {joint_pos_action.liftoff_max_rate:.3f} rad/s "
+              "(GETUP_ACTION_LIFTOFF_MAX_RATE)")
     # v10 beta-anchor fix: anchor the residual/beta scheme on the standing HOME
     # pose, NOT the entity's spawn default (= SUPINE, lying on the back). The
     # entity must keep spawning supine, but mjlab derives default_joint_pos from

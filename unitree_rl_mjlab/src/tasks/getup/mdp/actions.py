@@ -55,6 +55,24 @@ class LowPassJointPositionAction(JointPositionAction):
         self._max_target_delta = (
             None if cfg.max_rate is None else float(cfg.max_rate) * float(env.step_dt)
         )
+        # Liftoff phase: reduced alpha / slew right after the settle window, held
+        # for liftoff_steps then linearly blended back to the nominal values over
+        # liftoff_ramp_steps. liftoff_steps = 0 disables the phase entirely.
+        self._liftoff_steps = int(cfg.liftoff_steps)
+        self._liftoff_ramp_steps = max(int(cfg.liftoff_ramp_steps), 1)
+        self._liftoff_alpha = (
+            self._alpha if cfg.liftoff_alpha is None else float(cfg.liftoff_alpha)
+        )
+        if cfg.liftoff_max_rate is None:
+            self._liftoff_max_target_delta = self._max_target_delta
+        else:
+            assert self._max_target_delta is not None, (
+                "LowPassJointPositionAction: liftoff_max_rate requires max_rate to "
+                "be set (there is no nominal rate to ramp back to)."
+            )
+            self._liftoff_max_target_delta = float(cfg.liftoff_max_rate) * float(
+                env.step_dt
+            )
         if cfg.default_pos_override is not None:
             # Anchor the residual/beta scheme on an explicit pose instead of the
             # entity's spawn pose. mjlab derives default_joint_pos from
@@ -175,9 +193,33 @@ class LowPassJointPositionAction(JointPositionAction):
         desired_target = self._default_target + beta * (
             self._processed_actions - self._default_target
         )
+        # Liftoff phase: for the first liftoff_steps after the settle window use
+        # the reduced liftoff_alpha / liftoff_max_rate (a deliberately slower
+        # initial rise), then blend LINEARLY back to the nominal values over
+        # liftoff_ramp_steps — a hard step back to the fast values would itself
+        # be a jerk seam mid-rise. ramp_frac is per-env [B, 1]: 0 = full liftoff
+        # values, 1 = nominal values. During settle steps the ramp value is
+        # irrelevant (the settle override below wins).
+        alpha: torch.Tensor | float = self._alpha
+        max_target_delta: torch.Tensor | float | None = self._max_target_delta
+        if self._liftoff_steps > 0:
+            steps_since_settle = (
+                self._env.episode_length_buf - self._settle_steps
+            ).clamp(min=0)
+            ramp_frac = (
+                (steps_since_settle - self._liftoff_steps).float()
+                / self._liftoff_ramp_steps
+            ).clamp(0.0, 1.0).unsqueeze(-1)  # [B, 1]
+            alpha = self._liftoff_alpha + ramp_frac * (
+                self._alpha - self._liftoff_alpha
+            )
+            if self._max_target_delta is not None:
+                max_target_delta = self._liftoff_max_target_delta + ramp_frac * (
+                    self._max_target_delta - self._liftoff_max_target_delta
+                )
         ema_target = (
-            self._alpha * desired_target
-            + (1.0 - self._alpha) * self._filtered_target
+            alpha * desired_target
+            + (1.0 - alpha) * self._filtered_target
         )
         # Slew-rate limit (optional): bound the per-step change of the commanded
         # target to ±max_target_delta rad/joint relative to the previous realizable
@@ -185,11 +227,11 @@ class LowPassJointPositionAction(JointPositionAction):
         # Applied after the EMA so it caps ABSOLUTE speed — which the EMA, being a
         # fraction-of-distance filter, cannot — and before the joint-limit clamp so
         # the anti-windup filter state stays on the realizable command.
-        if self._max_target_delta is not None:
+        if max_target_delta is not None:
             delta = torch.clamp(
                 ema_target - self._filtered_target,
-                -self._max_target_delta,
-                self._max_target_delta,
+                -max_target_delta,
+                max_target_delta,
             )
             ema_target = self._filtered_target + delta
         self._filtered_target_unclamped = ema_target
@@ -361,6 +403,25 @@ class LowPassJointPositionActionCfg(JointPositionActionCfg):
     """Number of env-steps at the start of each episode during which the policy does
     NOT control: the PD target is held at the current measured pose so the robot
     settles onto the floor (the integrator resolves spawn contacts). 0 disables it."""
+
+    liftoff_steps: int = 0
+    """Number of env-steps right AFTER the settle window during which the reduced
+    `liftoff_alpha` / `liftoff_max_rate` values apply (a deliberately slower,
+    smoother initial rise). After this hold, the values blend linearly back to the
+    nominal `alpha` / `max_rate` over `liftoff_ramp_steps`. 0 disables the phase."""
+
+    liftoff_alpha: float | None = None
+    """EMA coefficient during the liftoff phase (lower = slower initial motion).
+    None = no override (use `alpha` throughout)."""
+
+    liftoff_max_rate: float | None = None
+    """Slew-rate limit (rad/s) during the liftoff phase. Requires `max_rate` to be
+    set (there must be a nominal rate to ramp back to). None = no override."""
+
+    liftoff_ramp_steps: int = 20
+    """Length (env-steps) of the linear blend from the liftoff values back to the
+    nominal `alpha` / `max_rate` once `liftoff_steps` have elapsed. A short ramp
+    avoids the jerk seam a hard step-change would introduce mid-rise."""
 
     default_pos_override: dict[str, float] | None = None
     """Optional anchor pose for the residual/beta scheme: regex -> angle (rad),
