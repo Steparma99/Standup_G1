@@ -784,10 +784,15 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # The +20 magnitude lives in the function, so weight=1.0 (binary-term convention).
         # tilt_threshold = mean per-foot ||proj_grav_xy||^2; 0.05 ~ within 13 deg of flat
         # (HoST's keypoint-variance proxy is unusable on the G1's lateral sole geoms).
+        # v19: reward 20.0 -> 10.0 — at it14000 this was the single largest term in
+        # the entire stack (8.6/ep, vs 4.5 for base_height), for a behavior (feet
+        # flat) already double-covered by post_stand_on_feet and post_feet_parallel.
+        # At 20 it monopolized the critic's budget and diluted the gradient on the
+        # unconverged pose terms; 10 keeps it top-of-style without dominating.
         "style_ankle_parallel": RewardTermCfg(
             func=mdp.style_ankle_parallel,
             weight=1.0,
-            params={"tilt_threshold": 0.05, "reward": 20.0,
+            params={"tilt_threshold": 0.05, "reward": 10.0,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # style_feet_stumble REMOVED (v9 ablation): weight-0 no-op scaffold on flat
@@ -1043,8 +1048,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # axes vs. the sagittal mirror plane, see mdp.rewards._MIRROR_SIGN), so it
         # cannot be fooled by one good side masking one bad side in the mean.
         # joint_weights set per-robot in env_cfgs.py.
+        # v19: weight 6.0 -> 8.0 — at it14000 this logged 1.32/6 (~22% of cap) and
+        # flat while the height/hold tier (base_height 4.5, hold 4.3) banked ~45%;
+        # the whole pose-quality bucket earned ~4.8/ep vs ~23/ep for get-tall-stay-
+        # tall, so symmetry needed a tier bump, not just per-joint retuning.
         "post_bilateral_symmetry": RewardTermCfg(
-            func=mdp.post_bilateral_symmetry, weight=6.0,
+            func=mdp.post_bilateral_symmetry, weight=8.0,
             params={"joint_weights": {}, "scale": 1.0, "kp": 4.0,
                     "height_threshold": 0.65, "ramp_from": 0.45,
                     "asset_cfg": SceneEntityCfg("robot")},
@@ -1072,8 +1081,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # 0.40 -> 0.096 over training — hip yaw drifted (legs crossing) while every
         # other post term climbed, i.e. at 2.5 with a standing-only band gate it was
         # losing the trade against com_over_support/stable stance rewards.
+        # v19: weight 4.0 -> 6.0 — logged 0.36/4 (~9% of cap) at it14000, the least
+        # saturated post term by far; the visible "crooked legs" at hold is largely
+        # hip-yaw, and at 4.0 it was still losing the trade (same failure mode the
+        # v9 2.5->4.0 bump addressed, one tier short).
         "post_feet_yaw": RewardTermCfg(
-            func=mdp.post_feet_yaw, weight=4.0,
+            func=mdp.post_feet_yaw, weight=6.0,
             params={"scale": 2.0, "ramp_from": 0.45,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),

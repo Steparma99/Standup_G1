@@ -439,7 +439,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # with the slew cap loosened to 3.0 via env var, so re-judge smoothness with
     # BOTH this alpha and the default 2.5 rad/s cap before lowering further).
     # Time constant ~123ms -> ~156ms at 50 Hz.
-    joint_pos_action.alpha = 0.12
+    # v19: 0.12 -> 0.10 — v18b ran with the correct 2.5 baked cap (the re-judge
+    # asked for above) and the rise is STILL faster than wanted; liftoff-phase
+    # values (_LIFTOFF_ALPHA/_LIFTOFF_MAX_RATE) untouched — the early rise was
+    # judged good in v18b, this slows the mid/late rise only.
+    joint_pos_action.alpha = 0.10
     _override_alpha = os.environ.get("GETUP_ACTION_ALPHA")
     if _override_alpha not in (None, ""):
         joint_pos_action.alpha = float(_override_alpha)
@@ -456,7 +460,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # — the limiter is part of the trained dynamics, never a deploy-only filter.
     # GETUP_ACTION_MAX_RATE still overrides for tuning (set 0 to get "no limit"
     # back via a huge value, e.g. 1e6).
-    joint_pos_action.max_rate = 2.5
+    # v19: 2.5 -> 2.0 rad/s — paired with the alpha 0.12->0.10 cut above; the
+    # slew cap is what bounds the big early-travel joints that alpha (fraction-
+    # of-distance EMA) structurally cannot slow. Revert to 2.5 first if the
+    # robot can no longer catch itself during the rise.
+    joint_pos_action.max_rate = 2.0
     _override_max_rate = os.environ.get("GETUP_ACTION_MAX_RATE")
     if _override_max_rate not in (None, ""):
         joint_pos_action.max_rate = float(_override_max_rate)
@@ -629,8 +637,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Arms weighted highest: this is the direct fix for "left hand stuck near the
     # hip while the right arm is fine" (or vice versa) recurring across runs even
     # with symmetric HOME-tracking weights — a MEAN error lets one good arm mask
-    # one bad arm, this term cannot be fooled that way. Legs/waist included at
-    # lower weight for full-body symmetry, but they were already converging fine.
+    # one bad arm, this term cannot be fooled that way.
+    # v19: leg weights raised toward arm parity (hip/knee 1.0 -> 2.5, ankle
+    # 0.5 -> 1.0) — the v18b hold still shows crooked/asymmetric legs, and at
+    # 1.0-vs-3.0 the legs got a sixth of the arms' share of this normalized
+    # mean, i.e. the one term that cannot be masked was barely looking at them.
     cfg.rewards["post_bilateral_symmetry"].params["joint_weights"] = {
         "shoulder_pitch": 3.0,
         "shoulder_roll": 3.0,
@@ -639,12 +650,12 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "wrist_roll": 0.5,
         "wrist_pitch": 0.5,
         "wrist_yaw": 0.5,
-        "hip_pitch": 1.0,
-        "hip_roll": 1.0,
-        "hip_yaw": 1.0,
-        "knee": 1.0,
-        "ankle_pitch": 0.5,
-        "ankle_roll": 0.5,
+        "hip_pitch": 2.5,
+        "hip_roll": 2.5,
+        "hip_yaw": 2.5,
+        "knee": 2.5,
+        "ankle_pitch": 1.0,
+        "ankle_roll": 1.0,
     }
 
     # Both-feet grounded: needs the foot site names to check height.
