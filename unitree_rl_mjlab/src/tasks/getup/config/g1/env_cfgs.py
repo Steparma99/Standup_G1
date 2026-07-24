@@ -630,6 +630,32 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_wrist_.*": 1.5,
     }
 
+    # v20: constant-gradient HOME pull (post_home_pose_l2) — same HOME target as
+    # the two exp-form terms above, but RAW L2 (see getup_env_cfg.py comment).
+    # Weights are ABSOLUTE (the metric is an unnormalized SUM, not a mean), so
+    # they are deliberately smaller than the exp terms' relative weights: each
+    # unit of weight here costs `weight * err^2` reward per step directly.
+    # Arms/legs/waist at 1.0 = the joints where the stuck crooked poses live;
+    # shoulder_yaw/ankles lower; wrists minimal (barely read on camera and the
+    # exp terms already cover them).
+    cfg.rewards["post_home_pose_l2"].params["target_joint_pos"] = dict(
+        HOME_KEYFRAME.joint_pos
+    )
+    cfg.rewards["post_home_pose_l2"].params["joint_weights"] = {
+        ".*_shoulder_pitch_joint": 1.0,
+        ".*_shoulder_roll_joint": 1.0,
+        ".*_shoulder_yaw_joint": 0.3,
+        ".*_elbow_joint": 1.0,
+        ".*_wrist_.*": 0.1,
+        "waist_.*": 1.0,
+        ".*_hip_pitch_joint": 1.0,
+        ".*_hip_roll_joint": 1.0,
+        ".*_hip_yaw_joint": 1.0,
+        ".*_knee_joint": 1.0,
+        ".*_ankle_pitch_joint": 0.4,
+        ".*_ankle_roll_joint": 0.4,
+    }
+
     # v16: left/right joint-angle MIRROR symmetry (post_bilateral_symmetry) — see
     # rewards.py docstring for why this is needed alongside the two HOME-tracking
     # terms above. Keys are joint FAMILY names (no left_/right_ prefix, no regex —
@@ -765,28 +791,23 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         _initial_beta = (
             float(_train_beta) if _train_beta not in (None, "") else _BETA_INITIAL
         )
-        # GETUP_TRAIN_FREEZE_BETA: HARD-freeze the curriculum at `initial_beta`.
-        # Unlike the plain INITIAL_BETA override (which keeps annealing), this pins
-        # beta for the whole run: no decay, no re-ramp, and the population circuit
-        # breaker is disabled (pause_below=-1 can never trigger). Use on a resume
-        # once the anneal has reached a good plateau and you want PPO to reconverge
-        # on a STATIONARY problem instead of a moving action-authority target.
-        # Same effect the eval path applies below, but at a chosen train beta.
-        _freeze_beta_env = os.environ.get("GETUP_TRAIN_FREEZE_BETA")
-        _freeze_beta = _freeze_beta_env not in (None, "", "0", "false", "False")
+        # v20: GETUP_TRAIN_FREEZE_BETA REMOVED. The freeze env var (added v13,
+        # 45aecfd) leaked across shell sessions and silently froze THREE runs that
+        # were meant to anneal (v18, v18b, v19) — the var survives in the terminal
+        # and any truthy leftover pinned beta with no error. Training beta now
+        # ALWAYS anneals (decay/ramp/breaker live); a stationary-beta reconverge,
+        # if ever needed again, must be a deliberate code change, not an env var.
+        # The eval-side --eval-beta pin is unaffected (separate code path).
+        if os.environ.get("GETUP_TRAIN_FREEZE_BETA") not in (None, ""):
+            print("[getup] WARNING: GETUP_TRAIN_FREEZE_BETA is set but IGNORED "
+                  "(freeze support removed in v20 — beta always anneals in training)")
         if _train_beta not in (None, ""):
-            _mode = "FROZEN, no anneal" if _freeze_beta else "continues annealing normally"
             print(f"[getup] TRAIN beta curriculum starting at {_initial_beta:.3f} "
-                  f"(GETUP_TRAIN_INITIAL_BETA override, {_mode})")
-        elif _freeze_beta:
-            print(f"[getup] TRAIN beta curriculum FROZEN at {_initial_beta:.3f} "
-                  "(GETUP_TRAIN_FREEZE_BETA set; no decay/ramp/breaker)")
-        # When freezing, zero the decay + re-ramp steps and disable the breaker so
-        # nothing can move beta off `initial_beta`.
-        _decrement = 0.0 if _freeze_beta else _BETA_DECREMENT
-        _ramp_up_step = 0.0 if _freeze_beta else _BETA_RAMP_UP_STEP
-        _pause_below = -1.0 if _freeze_beta else _BETA_PAUSE_BELOW
-        _recovery_step = 0.0 if _freeze_beta else _BETA_RECOVERY_STEP
+                  "(GETUP_TRAIN_INITIAL_BETA override, continues annealing normally)")
+        _decrement = _BETA_DECREMENT
+        _ramp_up_step = _BETA_RAMP_UP_STEP
+        _pause_below = _BETA_PAUSE_BELOW
+        _recovery_step = _BETA_RECOVERY_STEP
         cfg.events["beta_rescaler_curriculum"] = EventTermCfg(
             mode="step",
             func=BetaRescalerCurriculum,

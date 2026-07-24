@@ -1036,6 +1036,27 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "pelvis_height_threshold": 0.65, "kp": 4.0,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
+        # v20: constant-gradient HOME-pose pull (home_pose_l2, rewards.py) — the
+        # missing counterpart to post_standing_posture's exp form. exp(-kp*err)
+        # has near-zero gradient FAR from HOME, which is exactly where the
+        # recurring crooked-arm/leg stuck poses live (dead arm behind the back
+        # persisted v1->v19 through pure weight tuning). This term returns the
+        # RAW weighted squared error (negative weight => penalty), so the pull
+        # toward HOME grows with distance and never saturates or dies. Runs
+        # ALONGSIDE the exp terms: they reward being close, this punishes being
+        # far. Same standing gate (0.65m) as the other final-pose terms.
+        # Weight -2.0: worst observed crooked poses (~1-1.5 rad on 1-2 joints)
+        # cost ~-3..-5/step vs a ~+55/step healthy standing bundle — a real
+        # gradient without making standing net-negative. Halve to -1.0 if
+        # success/ever_stood drops after this change; raise toward -4.0 if the
+        # pose error plateaus again with this term's magnitude still small.
+        # target/joint_weights set per-robot in env_cfgs.py.
+        "post_home_pose_l2": RewardTermCfg(
+            func=mdp.home_pose_l2, weight=-2.0,
+            params={"target_joint_pos": {}, "joint_weights": {},
+                    "height_threshold": 0.65,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
         # Left/right joint-angle mirror symmetry (v16). Complements
         # post_upper_body_posture / post_standing_posture, which pull each joint
         # toward an absolute HOME target via a MEAN error across many joints — a
