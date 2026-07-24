@@ -42,8 +42,13 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         # 1.9 -> 2.2: posture shaping matters for a correct standup and the style terms
         # are height-gated (fire only once the robot rises), so a higher critic weight
         # amplifies them where they matter without disturbing floor-phase task learning.
+        # v21: post_task 1.0 -> 1.6 — every final-pose term (posture, symmetry,
+        # height, hold) lives in the post_task group, which was the LOWEST-weighted
+        # critic group (below style 2.2) while the final pose was the one thing not
+        # improving. Amplifies posture advantages where they matter; task/style
+        # (floor-phase + rise shaping, both healthy) untouched.
         algorithm=MultiCriticPpoAlgorithmCfg(
-            reward_group_weights=(2.5, 2.2, 0.1, 1.0),
+            reward_group_weights=(2.5, 2.2, 0.1, 1.6),
             # L2C2 smoothness: Lipschitz-continuity penalty on the actor and each critic,
             # added to the loss every update (lambda_actor=1.0, lambda_critic=0.1 per critic).
             l2c2_actor_coef=1.0,
@@ -53,7 +58,11 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             # objective sums L(phi_i) = ||return_i - V_i||^2 over the 4 group critics.
             use_clipped_value_loss=False,
             clip_param=0.2,
-            entropy_coef=0.005,
+            # v21: 0.005 -> 0.01 — the v20 run sat in a local optimum for 1800 its
+            # (stable_hold flat ~0.25, posture terms flat) with the policy still
+            # standing crooked; a stronger entropy bonus is the standard lever
+            # against premature convergence. Revert if KL/entropy show instability.
+            entropy_coef=0.01,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=5.0e-4,

@@ -638,16 +638,21 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Arms/legs/waist at 1.0 = the joints where the stuck crooked poses live;
     # shoulder_yaw/ankles lower; wrists minimal (barely read on camera and the
     # exp terms already cover them).
+    # v21: term weight -2 -> -4 (getup_env_cfg.py) AND arm/waist joint weights
+    # 1.0 -> 2.0 — the v20 run logged this term FLAT at ~-1.4 for 1800 its while
+    # the visible residual stayed in the arms/waist; this is the only
+    # non-saturating HOME pull so it gets both the budget and the focus. Legs
+    # stay at 1.0 (their error is already shaped by the high-weight exp terms).
     cfg.rewards["post_home_pose_l2"].params["target_joint_pos"] = dict(
         HOME_KEYFRAME.joint_pos
     )
     cfg.rewards["post_home_pose_l2"].params["joint_weights"] = {
-        ".*_shoulder_pitch_joint": 1.0,
-        ".*_shoulder_roll_joint": 1.0,
-        ".*_shoulder_yaw_joint": 0.3,
-        ".*_elbow_joint": 1.0,
-        ".*_wrist_.*": 0.1,
-        "waist_.*": 1.0,
+        ".*_shoulder_pitch_joint": 2.0,
+        ".*_shoulder_roll_joint": 2.0,
+        ".*_shoulder_yaw_joint": 0.6,
+        ".*_elbow_joint": 2.0,
+        ".*_wrist_.*": 0.2,
+        "waist_.*": 2.0,
         ".*_hip_pitch_joint": 1.0,
         ".*_hip_roll_joint": 1.0,
         ".*_hip_yaw_joint": 1.0,
@@ -656,18 +661,18 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_ankle_roll_joint": 0.4,
     }
 
-    # v16: left/right joint-angle MIRROR symmetry (post_bilateral_symmetry) — see
-    # rewards.py docstring for why this is needed alongside the two HOME-tracking
-    # terms above. Keys are joint FAMILY names (no left_/right_ prefix, no regex —
-    # the function resolves both sides + the correct mirror sign itself).
-    # Arms weighted highest: this is the direct fix for "left hand stuck near the
-    # hip while the right arm is fine" (or vice versa) recurring across runs even
-    # with symmetric HOME-tracking weights — a MEAN error lets one good arm mask
-    # one bad arm, this term cannot be fooled that way.
-    # v19: leg weights raised toward arm parity (hip/knee 1.0 -> 2.5, ankle
-    # 0.5 -> 1.0) — the v18b hold still shows crooked/asymmetric legs, and at
-    # 1.0-vs-3.0 the legs got a sixth of the arms' share of this normalized
-    # mean, i.e. the one term that cannot be masked was barely looking at them.
+    # v21: post_bilateral_symmetry REWRITTEN to HOME-anchored WORST-SIDE error
+    # (see rewards.py docstring). It now needs the HOME target too — same dict
+    # as the other posture terms so all HOME pulls agree. Keys are still joint
+    # FAMILY names (no left_/right_ prefix — the function resolves both sides).
+    # metric = max(weighted mean HOME error of left side, same for right side):
+    # the good side can never mask the bad side, and the gradient always points
+    # at HOME (the old L-vs-R form pulled the good limb toward the bad one).
+    # Weights kept from v19 (arms 3.0, legs 2.5): with the max() form they set
+    # WHICH joints define "worst side", not an L/R budget split.
+    cfg.rewards["post_bilateral_symmetry"].params["target_joint_pos"] = dict(
+        HOME_KEYFRAME.joint_pos
+    )
     cfg.rewards["post_bilateral_symmetry"].params["joint_weights"] = {
         "shoulder_pitch": 3.0,
         "shoulder_roll": 3.0,

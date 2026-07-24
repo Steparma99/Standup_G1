@@ -1050,33 +1050,37 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # gradient without making standing net-negative. Halve to -1.0 if
         # success/ever_stood drops after this change; raise toward -4.0 if the
         # pose error plateaus again with this term's magnitude still small.
+        # v21: -2.0 -> -4.0 — that predicted plateau happened: the v20 run logged
+        # this flat at ~-1.4 for 1800 its while the exp terms sat on their dead
+        # near-HOME gradient (diag sweep: post_standing_posture drops only
+        # 0.92->0.88 over the first 0.1 rad). This is the only non-saturating
+        # HOME pull, so it gets the budget; arm/waist joint weights also raised
+        # in env_cfgs.py so the visible residual (arms/waist) is what it bites.
         # target/joint_weights set per-robot in env_cfgs.py.
         "post_home_pose_l2": RewardTermCfg(
-            func=mdp.home_pose_l2, weight=-2.0,
+            func=mdp.home_pose_l2, weight=-4.0,
             params={"target_joint_pos": {}, "joint_weights": {},
                     "height_threshold": 0.65,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Left/right joint-angle mirror symmetry (v16). Complements
-        # post_upper_body_posture / post_standing_posture, which pull each joint
-        # toward an absolute HOME target via a MEAN error across many joints — a
-        # mean lets one converged arm offset one lagging arm, which is exactly the
-        # "left hand near the hip while the right arm is fine" pattern observed
-        # across multiple runs even after HOME-tracking weights were symmetrized.
-        # This term instead compares left and right joints directly to EACH OTHER
-        # (sign convention per joint family: pitch joints are symmetric q_L=q_R,
-        # roll/yaw joints are anti-symmetric q_L=-q_R — derived from the MJCF joint
-        # axes vs. the sagittal mirror plane, see mdp.rewards._MIRROR_SIGN), so it
-        # cannot be fooled by one good side masking one bad side in the mean.
-        # joint_weights set per-robot in env_cfgs.py.
-        # v19: weight 6.0 -> 8.0 — at it14000 this logged 1.32/6 (~22% of cap) and
-        # flat while the height/hold tier (base_height 4.5, hold 4.3) banked ~45%;
-        # the whole pose-quality bucket earned ~4.8/ep vs ~23/ep for get-tall-stay-
-        # tall, so symmetry needed a tier bump, not just per-joint retuning.
+        # v21 REWRITE: HOME-anchored WORST-SIDE posture reward (was L-vs-R mirror
+        # symmetry, v16-v20). The old form's gradient (`q_left - sign·q_right`)
+        # pulled the GOOD limb toward the BAD limb exactly as hard as the reverse
+        # and scored a symmetric-but-wrong pose (both arms behind the back)
+        # perfectly — the final pose was slightly better BEFORE v16 added it and
+        # worse after v19 raised its leg weights, while in the v20 run it paid
+        # only 1.12/8 (metric≈0.49: failing at its own job yet reshaping the
+        # landscape). New metric: max(weighted mean HOME error of LEFT side,
+        # same for RIGHT side) — keeps the anti-masking intent (the max ignores
+        # the good side, so it can never hide a bad limb) but the gradient lands
+        # 100% on the worst side and always points AT HOME. joint_weights (family
+        # names) + target_joint_pos (HOME) set per-robot in env_cfgs.py.
+        # Weight 8.0 -> 5.0: the v19 bump paid the wrong gradient more; the v21
+        # fix is a CORRECT gradient, not a bigger budget.
         "post_bilateral_symmetry": RewardTermCfg(
-            func=mdp.post_bilateral_symmetry, weight=8.0,
-            params={"joint_weights": {}, "scale": 1.0, "kp": 4.0,
-                    "height_threshold": 0.65, "ramp_from": 0.45,
+            func=mdp.post_bilateral_symmetry, weight=5.0,
+            params={"joint_weights": {}, "target_joint_pos": {}, "scale": 1.0,
+                    "kp": 4.0, "height_threshold": 0.65, "ramp_from": 0.45,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # Both-feet grounded reward: 0.5 for one foot, 1.0 for both. Directly penalizes

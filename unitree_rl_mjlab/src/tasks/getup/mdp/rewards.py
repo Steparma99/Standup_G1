@@ -1688,35 +1688,46 @@ _BILATERAL_SYMMETRY_CACHE_ATTR = "_bilateral_symmetry_cache"
 def post_bilateral_symmetry(
     env: ManagerBasedRlEnv,
     joint_weights: dict[str, float],
+    target_joint_pos: dict[str, float] | None = None,
     scale: float = 1.0,
     kp: float = 4.0,
     height_threshold: float = H_STAGE2,
     ramp_from: float | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward left/right joint-angle mirror symmetry directly: exp(-kp·metric)·gate [B,].
+    """Reward the WORSE side's HOME error: exp(-kp·max(metric_L, metric_R))·gate [B,].
 
-    Unlike post_upper_body_posture / post_standing_posture (which pull each joint
-    toward an absolute HOME target), this compares left and right joints to EACH
-    OTHER. That closes a specific gap the HOME-tracking terms cannot: a MEAN error
-    over many joints lets one converged arm offset one lagging arm, and the mean can
-    look fine while one side is visibly wrong. This term cannot be fooled that way —
-    it is exactly 0 (best) only when both sides genuinely match.
+    v21 REWRITE (HOME-anchored worst-side). The v16-v20 form compared left and right
+    joints to EACH OTHER (`q_left - sign·q_right`): its gradient pulled the GOOD limb
+    toward the BAD limb exactly as hard as the reverse — it had no idea which side was
+    correct, so a policy could satisfy it in a symmetric-but-wrong basin (both arms
+    behind the back scores perfectly). Training data confirmed the harm: the final
+    pose was slightly better before v16 added the term and worse after v19 raised its
+    leg weights, while in the v20 run it paid only 1.12/8.0 (metric≈0.49 — failing to
+    fix the asymmetry it was added for, yet still reshaping the landscape).
+
+    This form keeps the original ANTI-MASKING intent — a MEAN over many joints lets
+    one converged limb hide one lagging limb — but re-anchors both sides on the HOME
+    target: metric_side = weighted MEAN squared error of that side's joints from
+    HOME, and the reward sees only max(metric_L, metric_R). The max ignores the good
+    side entirely, so (a) the gradient lands 100% on the worst-deviating side and
+    always points AT HOME (never at the other limb), and (b) a good side can never
+    mask a bad one. It is maximal (=scale) only when BOTH sides are at HOME.
 
     ``joint_weights`` keys are joint FAMILY names (e.g. "shoulder_pitch", "elbow",
-    "hip_roll" — no left_/right_ prefix, no regex) that must be present in
-    `_MIRROR_SIGN`; the value is that pair's weight. For each family, error is
-    `q_left - sign·q_right` where sign is +1 (pitch joints: same sense under
-    mirroring) or -1 (roll/yaw joints: reversed sense under mirroring — see
-    `_MIRROR_SIGN`). metric = weighted MEAN of squared errors across the selected
-    pairs, normalized by total weight.
+    "hip_roll" — no left_/right_ prefix, no regex); the value weights that joint on
+    BOTH sides. Families are validated against `_MIRROR_SIGN` (same vocabulary as the
+    old form, so existing wiring keys stay valid). ``target_joint_pos`` is the HOME
+    pose as a {regex: value} dict (same object passed to post_upper_body_posture /
+    post_standing_posture), resolved per full joint name; missing joints target 0.0.
     """
     asset: Entity = env.scene[asset_cfg.name]
     cache = getattr(env, _BILATERAL_SYMMETRY_CACHE_ATTR, None)
     if cache is None:
         names = asset.joint_names
         name_to_id = {n: i for i, n in enumerate(names)}
-        left_ids, right_ids, signs, weights = [], [], [], []
+        tgt_full = resolve_expr(target_joint_pos or {}, names, 0.0)
+        left_ids, right_ids, tgt_left, tgt_right, weights = [], [], [], [], []
         for family, w in (joint_weights or {}).items():
             if family not in _MIRROR_SIGN:
                 raise ValueError(
@@ -1731,19 +1742,25 @@ def post_bilateral_symmetry(
                 )
             left_ids.append(name_to_id[left_name])
             right_ids.append(name_to_id[right_name])
-            signs.append(_MIRROR_SIGN[family])
+            tgt_left.append(tgt_full[name_to_id[left_name]])
+            tgt_right.append(tgt_full[name_to_id[right_name]])
             weights.append(w)
+        w_t = torch.tensor(weights, device=env.device)
         cache = {
             "left_ids": torch.tensor(left_ids, dtype=torch.long, device=env.device),
             "right_ids": torch.tensor(right_ids, dtype=torch.long, device=env.device),
-            "signs": torch.tensor(signs, device=env.device),
-            "w": torch.tensor(weights, device=env.device),
-            "n_w": torch.tensor(weights, device=env.device).sum().clamp(min=1e-6),
+            "tgt_left": torch.tensor(tgt_left, device=env.device),
+            "tgt_right": torch.tensor(tgt_right, device=env.device),
+            "w": w_t,
+            "n_w": w_t.sum().clamp(min=1e-6),
         }
         setattr(env, _BILATERAL_SYMMETRY_CACHE_ATTR, cache)
     q = asset.data.joint_pos
-    err = q[:, cache["left_ids"]] - cache["signs"] * q[:, cache["right_ids"]]  # [B, P]
-    metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B]
+    err_l = q[:, cache["left_ids"]] - cache["tgt_left"]  # [B, P]
+    err_r = q[:, cache["right_ids"]] - cache["tgt_right"]  # [B, P]
+    metric_l = torch.sum(cache["w"] * err_l.pow(2), dim=1) / cache["n_w"]  # [B]
+    metric_r = torch.sum(cache["w"] * err_r.pow(2), dim=1) / cache["n_w"]  # [B]
+    metric = torch.maximum(metric_l, metric_r)  # worst side only
     return scale * torch.exp(-kp * metric) * _post_gate(
         asset, height_threshold, ramp_from=ramp_from
     )
