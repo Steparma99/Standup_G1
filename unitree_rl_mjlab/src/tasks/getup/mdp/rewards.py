@@ -341,6 +341,7 @@ def standing_posture(
     env: ManagerBasedRlEnv,
     target_joint_pos: dict[str, float],
     joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
     pelvis_height_threshold: float = 0.6,
     band: float = 0.12,
     kp: float = 2.0,
@@ -375,10 +376,13 @@ def standing_posture(
         w = torch.tensor(
             [resolve_expr(joint_weights or {}, names, 0.0)], device=env.device
         )
-        cache = {"tgt": tgt, "w": w}
+        band_t = torch.tensor(
+            [resolve_expr(joint_bands or {}, names, 0.0)], device=env.device
+        )
+        cache = {"tgt": tgt, "w": w, "band": band_t}
         setattr(env, _POSTURE_CACHE_ATTR, cache)
     err = asset.data.joint_pos - cache["tgt"]  # [B, J]
-    metric = torch.sum(cache["w"] * err.pow(2), dim=1)  # [B], weighted L2 (SUM)
+    metric = torch.sum(cache["w"] * _banded_sq_err(err, cache["band"]), dim=1)  # [B]
     # Normalize by the total weight so the exponent is the MEAN per-joint weighted
     # squared error, not a sum that grows with the joint count. Without this, with
     # sum_w~49 across 29 joints even a modest 0.2 rad/joint error gives metric~2.0 ->
@@ -1442,10 +1446,34 @@ def _post_gate(
     return height_gate * upright
 
 
+def _banded_sq_err(err: torch.Tensor, band: torch.Tensor) -> torch.Tensor:
+    """Per-joint squared error with a symmetric dead-zone band [..., J].
+
+    ``err``  : signed joint error (q - target), any leading shape, last dim = joints.
+    ``band`` : per-joint tolerance HALF-WIDTH (>= 0), broadcastable over ``err``.
+
+    Returns the squared EXCESS error beyond the band: 0 while |err| <= band (the
+    joint may sit anywhere in [target-band, target+band] at no cost), then growing
+    quadratically once outside, exactly like the raw err**2 shifted outward by
+    ``band``. With band == 0 everywhere this is identical to err**2, so it is a
+    drop-in that reproduces the pre-band behavior for any joint given band 0.
+
+    Because the excess is clamped to <= |err|, the resulting metric is always <=
+    the un-banded metric — so every posture term built on it can only move toward
+    a SMALLER penalty / LARGER bounded reward, never a larger magnitude. This is
+    the v22 change: the HOME-pose terms stop pulling toward the EXACT keyframe
+    (which may not be a holdable equilibrium) and instead tolerate a window around
+    it, letting the policy settle into a nearby stable stance.
+    """
+    excess = torch.clamp(err.abs() - band, min=0.0)
+    return excess.pow(2)
+
+
 def home_pose_l2(
     env: ManagerBasedRlEnv,
     target_joint_pos: dict[str, float],
     joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
     height_threshold: float = H_STAGE2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -1474,10 +1502,13 @@ def home_pose_l2(
         w = torch.tensor(
             [resolve_expr(joint_weights or {}, names, 0.0)], device=env.device
         )
-        cache = {"tgt": tgt, "w": w}
+        band = torch.tensor(
+            [resolve_expr(joint_bands or {}, names, 0.0)], device=env.device
+        )
+        cache = {"tgt": tgt, "w": w, "band": band}
         setattr(env, _HOME_L2_CACHE_ATTR, cache)
-    err = asset.data.joint_pos - cache["tgt"]          # [B, J]
-    metric = torch.sum(cache["w"] * err.pow(2), dim=1) # [B]
+    err = asset.data.joint_pos - cache["tgt"]                       # [B, J]
+    metric = torch.sum(cache["w"] * _banded_sq_err(err, cache["band"]), dim=1)  # [B]
     return metric * _post_gate(asset, height_threshold)
 
 
@@ -1605,6 +1636,7 @@ def post_upper_body_posture(
     env: ManagerBasedRlEnv,
     target_joint_pos: dict[str, float],
     joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
     scale: float = 1.0,
     k: float = 3.0,
     max_metric: float = 1.0,
@@ -1653,10 +1685,11 @@ def post_upper_body_posture(
         names = asset.joint_names
         tgt = torch.tensor([resolve_expr(target_joint_pos or {}, names, 0.0)], device=env.device)
         w = torch.tensor([resolve_expr(joint_weights or {}, names, 0.0)], device=env.device)
-        cache = {"tgt": tgt, "w": w, "n_w": w.sum().clamp(min=1.0)}
+        band = torch.tensor([resolve_expr(joint_bands or {}, names, 0.0)], device=env.device)
+        cache = {"tgt": tgt, "w": w, "band": band, "n_w": w.sum().clamp(min=1.0)}
         setattr(env, _POST_UPPER_CACHE_ATTR, cache)
     err = asset.data.joint_pos - cache["tgt"]  # [B, J]
-    metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B], mean
+    metric = torch.sum(cache["w"] * _banded_sq_err(err, cache["band"]), dim=1) / cache["n_w"]  # [B]
     metric = torch.clamp(metric, max=max_metric)
     return scale * (torch.exp(k * metric) - 1.0) * _post_gate(
         asset, height_threshold, ramp_from=ramp_from
@@ -1689,6 +1722,7 @@ def post_bilateral_symmetry(
     env: ManagerBasedRlEnv,
     joint_weights: dict[str, float],
     target_joint_pos: dict[str, float] | None = None,
+    joint_bands: dict[str, float] | None = None,
     scale: float = 1.0,
     kp: float = 4.0,
     height_threshold: float = H_STAGE2,
@@ -1727,7 +1761,7 @@ def post_bilateral_symmetry(
         names = asset.joint_names
         name_to_id = {n: i for i, n in enumerate(names)}
         tgt_full = resolve_expr(target_joint_pos or {}, names, 0.0)
-        left_ids, right_ids, tgt_left, tgt_right, weights = [], [], [], [], []
+        left_ids, right_ids, tgt_left, tgt_right, weights, bands = [], [], [], [], [], []
         for family, w in (joint_weights or {}).items():
             if family not in _MIRROR_SIGN:
                 raise ValueError(
@@ -1745,6 +1779,7 @@ def post_bilateral_symmetry(
             tgt_left.append(tgt_full[name_to_id[left_name]])
             tgt_right.append(tgt_full[name_to_id[right_name]])
             weights.append(w)
+            bands.append(float((joint_bands or {}).get(family, 0.0)))
         w_t = torch.tensor(weights, device=env.device)
         cache = {
             "left_ids": torch.tensor(left_ids, dtype=torch.long, device=env.device),
@@ -1752,14 +1787,15 @@ def post_bilateral_symmetry(
             "tgt_left": torch.tensor(tgt_left, device=env.device),
             "tgt_right": torch.tensor(tgt_right, device=env.device),
             "w": w_t,
+            "band": torch.tensor(bands, device=env.device),
             "n_w": w_t.sum().clamp(min=1e-6),
         }
         setattr(env, _BILATERAL_SYMMETRY_CACHE_ATTR, cache)
     q = asset.data.joint_pos
     err_l = q[:, cache["left_ids"]] - cache["tgt_left"]  # [B, P]
     err_r = q[:, cache["right_ids"]] - cache["tgt_right"]  # [B, P]
-    metric_l = torch.sum(cache["w"] * err_l.pow(2), dim=1) / cache["n_w"]  # [B]
-    metric_r = torch.sum(cache["w"] * err_r.pow(2), dim=1) / cache["n_w"]  # [B]
+    metric_l = torch.sum(cache["w"] * _banded_sq_err(err_l, cache["band"]), dim=1) / cache["n_w"]  # [B]
+    metric_r = torch.sum(cache["w"] * _banded_sq_err(err_r, cache["band"]), dim=1) / cache["n_w"]  # [B]
     metric = torch.maximum(metric_l, metric_r)  # worst side only
     return scale * torch.exp(-kp * metric) * _post_gate(
         asset, height_threshold, ramp_from=ramp_from

@@ -131,6 +131,45 @@ _BETA_RECOVERY_STEP  = 0.0025  # per-episode upward nudge while paused (~decreme
 _BETA_EMA_ALPHA      = 0.5     # EMA time constant ~2 population-generations of episodes
 
 # ---------------------------------------------------------------------------
+# v22: HOME-pose tolerance bands (dead-zones).
+# Per-joint HALF-WIDTH (radians) of a no-penalty window centred on the HOME
+# target. Inside |q - HOME| <= band a joint pays no posture penalty / earns full
+# posture reward; outside, the existing quadratic/exp shaping resumes unchanged.
+# Rationale: the exact HOME keyframe may not be a holdable equilibrium, so the
+# posture terms were fighting a policy trying to settle into a nearby stable
+# stance (post_home_pose_l2 / post_upper_body_posture drifted WORSE across the
+# whole v21 run). These bands are applied CONSISTENTLY to every joint-space
+# HOME-pose term (post_home_pose_l2, post_standing_posture,
+# post_upper_body_posture, post_bilateral_symmetry) so a genuine tolerance
+# window actually exists — banding only some terms would leave the others still
+# pulling to the exact point inside the window. Banding only ever SHRINKS each
+# metric, so no term can grow in magnitude (penalties -> less negative, bounded
+# rewards -> toward their existing max). Widen if the probe shows the policy
+# still cannot settle; tighten if HOME conformance visibly degrades.
+# _HOME_POSE_BANDS: regex keys (for the three regex-keyed terms).
+_HOME_POSE_BANDS = {
+    ".*_shoulder_pitch_joint": 0.15,
+    ".*_shoulder_roll_joint": 0.15,
+    ".*_shoulder_yaw_joint": 0.20,
+    ".*_elbow_joint": 0.15,
+    ".*_wrist_.*": 0.30,
+    "waist_.*": 0.10,
+    ".*_hip_pitch_joint": 0.12,
+    ".*_hip_roll_joint": 0.12,
+    ".*_hip_yaw_joint": 0.12,
+    ".*_knee_joint": 0.12,
+    ".*_ankle_pitch_joint": 0.10,
+    ".*_ankle_roll_joint": 0.10,
+}
+# _HOME_POSE_BANDS_FAMILY: joint-FAMILY keys (post_bilateral_symmetry), same values.
+_HOME_POSE_BANDS_FAMILY = {
+    "shoulder_pitch": 0.15, "shoulder_roll": 0.15, "shoulder_yaw": 0.20,
+    "elbow": 0.15, "wrist_roll": 0.30, "wrist_pitch": 0.30, "wrist_yaw": 0.30,
+    "hip_pitch": 0.12, "hip_roll": 0.12, "hip_yaw": 0.12, "knee": 0.12,
+    "ankle_pitch": 0.10, "ankle_roll": 0.10,
+}
+
+# ---------------------------------------------------------------------------
 # Reset drop + settling phase.
 #
 # The keyframes (g1_constants.py) now spawn ~0.5 cm above their true resting height,
@@ -558,6 +597,9 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # at 0.5 the waist barely registered in the normalized mean vs the 2.5 arms.
         "waist_.*": 1.5,
     }
+    # v22: HOME dead-zone (see _HOME_POSE_BANDS) — tolerate a window around HOME
+    # instead of pulling to the exact keyframe.
+    cfg.rewards["post_upper_body_posture"].params["joint_bands"] = dict(_HOME_POSE_BANDS)
     # v9 Pass 2 (arm-weight bump): after Pass 1 (symmetric weights + assist force
     # decayed to ~0) the arm still trailed and this term kept WORSENING through the
     # whole 1200-it resume (-1.05 -> -1.23), while stable_hold/fall_after_success
@@ -629,6 +671,8 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_elbow_joint": 3.5,
         ".*_wrist_.*": 1.5,
     }
+    # v22: HOME dead-zone (see _HOME_POSE_BANDS).
+    cfg.rewards["post_standing_posture"].params["joint_bands"] = dict(_HOME_POSE_BANDS)
 
     # v20: constant-gradient HOME pull (post_home_pose_l2) — same HOME target as
     # the two exp-form terms above, but RAW L2 (see getup_env_cfg.py comment).
@@ -660,6 +704,8 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ".*_ankle_pitch_joint": 0.4,
         ".*_ankle_roll_joint": 0.4,
     }
+    # v22: HOME dead-zone (see _HOME_POSE_BANDS).
+    cfg.rewards["post_home_pose_l2"].params["joint_bands"] = dict(_HOME_POSE_BANDS)
 
     # v21: post_bilateral_symmetry REWRITTEN to HOME-anchored WORST-SIDE error
     # (see rewards.py docstring). It now needs the HOME target too — same dict
@@ -688,6 +734,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "ankle_pitch": 1.0,
         "ankle_roll": 1.0,
     }
+    # v22: HOME dead-zone, family-keyed (see _HOME_POSE_BANDS_FAMILY).
+    cfg.rewards["post_bilateral_symmetry"].params["joint_bands"] = dict(
+        _HOME_POSE_BANDS_FAMILY
+    )
 
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
