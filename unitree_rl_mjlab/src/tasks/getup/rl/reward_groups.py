@@ -81,7 +81,6 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "arms_in_front": "post_task",
     "post_joint_stillness": "post_task",
     "standing_alive_bonus": "post_task",
-    "joint_symmetry_mirror": "post_task",
 }
 
 

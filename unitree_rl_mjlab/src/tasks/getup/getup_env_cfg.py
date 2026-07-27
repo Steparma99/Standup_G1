@@ -1149,13 +1149,18 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # arms in front, whole-body stillness, stay-standing, L/R symmetry — with
         # generous tolerance and let the policy find its own stable pose. Palm site
         # names for arms_in_front are set per-robot in env_cfgs.py.
+        # v24: band [0.12, 0.30] m (margin 0.10) = palm IN FRONT, clear of the body
+        # (>0.12, torso surface ~0.10 forward), NOT extended (<0.30). HOME's natural
+        # palm sits at 0.157 (inside). ramp_from=None → active ONLY near standing (the
+        # v23 ramp_from=0.45 wrongly shaped the arms from the rise phase onward).
         "arms_in_front": RewardTermCfg(
             func=mdp.arms_in_front, weight=5.0,
-            params={"fwd_lo": 0.10, "fwd_hi": 0.35, "margin": 0.15,
-                    "ramp_from": 0.45,
+            params={"fwd_lo": 0.12, "fwd_hi": 0.30, "margin": 0.10,
+                    "ramp_from": None,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
         # Stillness is SECONDARY to being stably up (user directive) — modest weight.
+        # v24: function fixed to RMS per-joint velocity (v23 L2-norm form never fired).
         "post_joint_stillness": RewardTermCfg(
             func=mdp.post_joint_stillness, weight=3.0,
             params={"v_free": 0.5, "margin": 1.5, "asset_cfg": SceneEntityCfg("robot")},
@@ -1166,12 +1171,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.standing_alive_bonus, weight=2.0,
             params={"asset_cfg": SceneEntityCfg("robot")},
         ),
-        # Relational L/R symmetry (mirror each other, NOT HOME) — low weight.
-        "joint_symmetry_mirror": RewardTermCfg(
-            func=mdp.joint_symmetry_mirror, weight=1.5,
-            params={"scale": 1.0, "kp": 4.0, "ramp_from": 0.45,
-                    "joint_weights": {}, "asset_cfg": SceneEntityCfg("robot")},
-        ),
+        # v24: symmetry reward REMOVED (user directive — it was the term that started
+        # the plateau at v16, and v23's weakened relational version did not help either;
+        # asymmetry is emergent, not a code bug — a full audit found no L/R structural
+        # asymmetry). post_bilateral_symmetry stays disabled (weight 0) for easy re-add.
     }
 
     ##

@@ -764,15 +764,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["arms_in_front"].params["asset_cfg"].site_names = (
         "left_palm", "right_palm",
     )
-    # v23 relational L/R symmetry (mirror each other, no HOME). Same joint FAMILIES
-    # the old HOME-anchored term used, low uniform weight — legs weighted a bit
-    # higher than arms so a symmetric stance is favoured without over-constraining.
-    cfg.rewards["joint_symmetry_mirror"].params["joint_weights"] = {
-        "shoulder_pitch": 1.0, "shoulder_roll": 1.0, "shoulder_yaw": 0.5,
-        "elbow": 1.0, "wrist_roll": 0.3, "wrist_pitch": 0.3, "wrist_yaw": 0.3,
-        "hip_pitch": 1.5, "hip_roll": 1.5, "hip_yaw": 1.5, "knee": 1.5,
-        "ankle_pitch": 0.8, "ankle_roll": 0.8,
-    }
+    # v24: joint_symmetry_mirror REMOVED (no symmetry reward — see getup_env_cfg.py).
 
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names

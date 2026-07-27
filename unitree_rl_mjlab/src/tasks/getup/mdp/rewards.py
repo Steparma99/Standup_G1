@@ -1907,17 +1907,22 @@ def post_joint_stillness(
 ) -> torch.Tensor:
     """Post-task WHOLE-BODY joint stillness, dead-zoned and HOME-gated [B,].
 
-    f_tol(‖q̇_actuated‖, [0, v_free], margin) · HOME_gate: full reward while the
-    actuated-joint velocity norm stays under ``v_free`` (dead zone for small settling
+    f_tol(rms(q̇_actuated), [0, v_free], margin) · HOME_gate: full reward while the
+    RMS per-joint velocity stays under ``v_free`` (dead zone for small settling
     adjustments), decaying above. Mirrors post_base_lin_vel / post_base_ang_vel but on
     JOINT velocity, so the policy is rewarded for holding a quiet pose once standing —
     not only a quiet base. Gated to _HOME_HEIGHT so it never penalises the push-off
     motion during the rise. Deliberately SECONDARY to the stability terms (being stably
     up matters more than being motionless); wire it at a modest weight.
+
+    NOTE (v24 fix): uses RMS (dof-count-invariant "typical per-joint speed"), NOT the
+    raw L2 norm over all 29 joints. The v23 norm form made ‖q̇‖ blow past v_free=0.5
+    on any small residual motion (a sum over 29 dofs), so the term logged ~0.0004 —
+    it never fired. RMS makes v_free a per-joint threshold matching the design intent.
     """
     asset: Entity = env.scene[asset_cfg.name]
     ctrl_ids = asset.indexing.ctrl_ids
-    speed = asset.data.joint_vel[:, ctrl_ids].norm(dim=-1)
+    speed = asset.data.joint_vel[:, ctrl_ids].pow(2).mean(dim=-1).sqrt()  # RMS per joint
     return f_tol(speed, 0.0, v_free, margin, value_at_margin) * _post_gate(
         asset, height_threshold, band=band
     )
