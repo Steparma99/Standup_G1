@@ -590,7 +590,10 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["post_upper_body_posture"].params["joint_weights"] = {
         ".*_shoulder_pitch_joint": 2.5,
         ".*_shoulder_roll_joint": 2.5,
-        ".*_shoulder_yaw_joint": 0.5,
+        # Arm-behind-the-back is primarily a shoulder-orientation defect, not an elbow
+        # one, so raise the yaw pull to make the residual arm error expensive in the
+        # one term dedicated to upper-body HOME conformance.
+        ".*_shoulder_yaw_joint": 1.5,
         ".*_elbow_joint": 2.5,
         ".*_wrist_.*": 0.3,
         # v16: 0.5 -> 1.5 — the final pose shows a torso-vs-legs twist (waist_yaw);
@@ -625,7 +628,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.metrics["posture/left_arm_error"].params["joint_weights"] = {
             "left_shoulder_pitch_joint": 2.5,
             "left_shoulder_roll_joint": 2.5,
-            "left_shoulder_yaw_joint": 0.5,
+            "left_shoulder_yaw_joint": 1.5,
             "left_elbow_joint": 2.5,
             "left_wrist_.*": 0.3,
         }
@@ -636,7 +639,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.metrics["posture/right_arm_error"].params["joint_weights"] = {
             "right_shoulder_pitch_joint": 2.5,
             "right_shoulder_roll_joint": 2.5,
-            "right_shoulder_yaw_joint": 0.5,
+            "right_shoulder_yaw_joint": 1.5,
             "right_elbow_joint": 2.5,
             "right_wrist_.*": 0.3,
         }
@@ -693,16 +696,19 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["post_home_pose_l2"].params["joint_weights"] = {
         ".*_shoulder_pitch_joint": 2.0,
         ".*_shoulder_roll_joint": 2.0,
-        ".*_shoulder_yaw_joint": 0.6,
+        # Concentrate the non-saturating HOME pull on the joints that define the two
+        # visible residual defects: the trailing arm (shoulder yaw) and the crooked
+        # lower-body line (hip/ankle frontal-transverse alignment).
+        ".*_shoulder_yaw_joint": 1.5,
         ".*_elbow_joint": 2.0,
         ".*_wrist_.*": 0.2,
         "waist_.*": 2.0,
         ".*_hip_pitch_joint": 1.0,
-        ".*_hip_roll_joint": 1.0,
-        ".*_hip_yaw_joint": 1.0,
+        ".*_hip_roll_joint": 2.0,
+        ".*_hip_yaw_joint": 1.5,
         ".*_knee_joint": 1.0,
         ".*_ankle_pitch_joint": 0.4,
-        ".*_ankle_roll_joint": 0.4,
+        ".*_ankle_roll_joint": 1.0,
     }
     # v22: HOME dead-zone (see _HOME_POSE_BANDS).
     cfg.rewards["post_home_pose_l2"].params["joint_bands"] = dict(_HOME_POSE_BANDS)

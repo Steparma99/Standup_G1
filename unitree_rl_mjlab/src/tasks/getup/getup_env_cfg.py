@@ -1075,10 +1075,13 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # the good side, so it can never hide a bad limb) but the gradient lands
         # 100% on the worst side and always points AT HOME. joint_weights (family
         # names) + target_joint_pos (HOME) set per-robot in env_cfgs.py.
-        # Weight 8.0 -> 5.0: the v19 bump paid the wrong gradient more; the v21
-        # fix is a CORRECT gradient, not a bigger budget.
+        # Weight 5.0 -> 2.0: keep the anti-masking diagnostic pressure, but let the
+        # more specific HOME-pose pulls dominate the next A/B test. At this point the
+        # residual defects are not "generic asymmetry" problems; they are specific
+        # shoulder-yaw / lower-body alignment errors that the targeted posture terms can
+        # address more directly.
         "post_bilateral_symmetry": RewardTermCfg(
-            func=mdp.post_bilateral_symmetry, weight=5.0,
+            func=mdp.post_bilateral_symmetry, weight=2.0,
             params={"joint_weights": {}, "target_joint_pos": {}, "scale": 1.0,
                     "kp": 4.0, "height_threshold": 0.65, "ramp_from": 0.45,
                     "asset_cfg": SceneEntityCfg("robot")},
