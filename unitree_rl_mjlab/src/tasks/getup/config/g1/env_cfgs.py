@@ -745,6 +745,35 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         _HOME_POSE_BANDS_FAMILY
     )
 
+    # -----------------------------------------------------------------------
+    # v23: DISABLE the exact-HOME-pose imitation terms (do NOT delete — they and
+    # their override blocks above stay intact as no-ops so HOME imitation can be
+    # re-enabled in one line later). These four terms all pull every joint toward
+    # the exact HOME keyframe; piled up over v16-v22 they created conflicting
+    # gradients around a pose the body may not be able to hold (final pose wrong +
+    # topples after standing). Replaced by the v23 FUNCTIONAL terms below.
+    # -----------------------------------------------------------------------
+    cfg.rewards["post_home_pose_l2"].weight = 0.0
+    cfg.rewards["post_standing_posture"].weight = 0.0
+    cfg.rewards["post_upper_body_posture"].weight = 0.0
+    cfg.rewards["post_bilateral_symmetry"].weight = 0.0  # HOME-anchored — replaced by
+    #                                                      relational joint_symmetry_mirror
+
+    # v23 arms_in_front: hands IN FRONT of the torso (not pinned to body, not
+    # extended). Uses the palm sites; band [fwd_lo, fwd_hi] set in getup_env_cfg.py.
+    cfg.rewards["arms_in_front"].params["asset_cfg"].site_names = (
+        "left_palm", "right_palm",
+    )
+    # v23 relational L/R symmetry (mirror each other, no HOME). Same joint FAMILIES
+    # the old HOME-anchored term used, low uniform weight — legs weighted a bit
+    # higher than arms so a symmetric stance is favoured without over-constraining.
+    cfg.rewards["joint_symmetry_mirror"].params["joint_weights"] = {
+        "shoulder_pitch": 1.0, "shoulder_roll": 1.0, "shoulder_yaw": 0.5,
+        "elbow": 1.0, "wrist_roll": 0.3, "wrist_pitch": 0.3, "wrist_yaw": 0.3,
+        "hip_pitch": 1.5, "hip_roll": 1.5, "hip_yaw": 1.5, "knee": 1.5,
+        "ankle_pitch": 0.8, "ankle_roll": 0.8,
+    }
+
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
 

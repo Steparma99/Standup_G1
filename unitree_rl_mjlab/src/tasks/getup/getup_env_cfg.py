@@ -1144,6 +1144,34 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.stable_success_hold, weight=10.0,
             params={"n_hold": 15, "height_threshold": 0.65, "asset_cfg": SceneEntityCfg("robot")},
         ),
+        # v23 FUNCTIONAL final-pose terms (replace the exact-HOME imitation terms,
+        # which are set to weight 0 in config/g1/env_cfgs.py). Specify the objective —
+        # arms in front, whole-body stillness, stay-standing, L/R symmetry — with
+        # generous tolerance and let the policy find its own stable pose. Palm site
+        # names for arms_in_front are set per-robot in env_cfgs.py.
+        "arms_in_front": RewardTermCfg(
+            func=mdp.arms_in_front, weight=5.0,
+            params={"fwd_lo": 0.10, "fwd_hi": 0.35, "margin": 0.15,
+                    "ramp_from": 0.45,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
+        # Stillness is SECONDARY to being stably up (user directive) — modest weight.
+        "post_joint_stillness": RewardTermCfg(
+            func=mdp.post_joint_stillness, weight=3.0,
+            params={"v_free": 0.5, "margin": 1.5, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Gentle 'stay standing' survival bonus (low weight — post_base_height already
+        # rewards being AT height; this rewards DURATION of standing).
+        "standing_alive_bonus": RewardTermCfg(
+            func=mdp.standing_alive_bonus, weight=2.0,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # Relational L/R symmetry (mirror each other, NOT HOME) — low weight.
+        "joint_symmetry_mirror": RewardTermCfg(
+            func=mdp.joint_symmetry_mirror, weight=1.5,
+            params={"scale": 1.0, "kp": 4.0, "ramp_from": 0.45,
+                    "joint_weights": {}, "asset_cfg": SceneEntityCfg("robot")},
+        ),
     }
 
     ##

@@ -1848,6 +1848,160 @@ def post_feet_yaw(
     )
 
 
+# ---------------------------------------------------------------------------
+# v23: FUNCTIONAL final-pose terms. These specify the OBJECTIVE (arms in front,
+# whole-body stillness, stay-standing, left/right symmetry) with generous
+# tolerance and let the policy discover its own stable joint configuration —
+# replacing the exact-HOME-pose imitation terms (post_home_pose_l2 /
+# post_standing_posture / post_upper_body_posture, now weight 0) that piled up in
+# v16-v22 and created conflicting gradients around a pose the body may not hold.
+# ---------------------------------------------------------------------------
+
+
+def arms_in_front(
+    env: ManagerBasedRlEnv,
+    fwd_lo: float = 0.10,
+    fwd_hi: float = 0.35,
+    margin: float = 0.15,
+    value_at_margin: float = 0.1,
+    torso_body: str = "torso_link",
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = _POST_GATE_RAMP_FROM,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward the palms being IN FRONT of the torso, in a comfortable band [B,].
+
+    Each palm position is expressed in the TORSO frame (yaw-invariant, via
+    quat_apply_inverse) and its FORWARD (+X) component relative to the torso is
+    scored by f_tol against the band ``[fwd_lo, fwd_hi]`` metres: full reward when
+    the hand is far enough forward not to be pinned against the body (>= fwd_lo) but
+    not stretched out (<= fwd_hi), Gaussian falloff outside. A hand BEHIND the torso
+    (arm-behind-the-back) has forward < 0 and scores ~0.
+
+    Non-prescriptive: it constrains WHERE the hands are, not the joint angles, so the
+    policy is free to reach that region however is stable. ``ramp_from`` fades it in
+    during the rise so the arms-behind-the-back habit (which forms while rising) is
+    shaped, not only corrected once standing. asset_cfg carries the palm site names.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    torso_ids = _cached_body_ids(env, asset, (torso_body,), "_arms_torso_id")  # [1]
+    torso_pos = asset.data.body_link_pos_w[:, torso_ids, :]   # [B, 1, 3]
+    torso_quat = asset.data.body_link_quat_w[:, torso_ids, :]  # [B, 1, 4]
+    palm_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]   # [B, P, 3]
+    offset_w = palm_w - torso_pos                             # [B, P, 3]
+    quat = torso_quat.expand(-1, palm_w.shape[1], -1)         # [B, P, 4]
+    offset_b = quat_apply_inverse(quat, offset_w)             # [B, P, 3]
+    fwd = offset_b[..., 0]                                    # [B, P] forward comp
+    r = f_tol(fwd, fwd_lo, fwd_hi, margin, value_at_margin)   # [B, P]
+    return r.mean(dim=1) * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def post_joint_stillness(
+    env: ManagerBasedRlEnv,
+    v_free: float = 0.5,
+    margin: float = 1.5,
+    value_at_margin: float = 0.1,
+    height_threshold: float = _HOME_HEIGHT,
+    band: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task WHOLE-BODY joint stillness, dead-zoned and HOME-gated [B,].
+
+    f_tol(‖q̇_actuated‖, [0, v_free], margin) · HOME_gate: full reward while the
+    actuated-joint velocity norm stays under ``v_free`` (dead zone for small settling
+    adjustments), decaying above. Mirrors post_base_lin_vel / post_base_ang_vel but on
+    JOINT velocity, so the policy is rewarded for holding a quiet pose once standing —
+    not only a quiet base. Gated to _HOME_HEIGHT so it never penalises the push-off
+    motion during the rise. Deliberately SECONDARY to the stability terms (being stably
+    up matters more than being motionless); wire it at a modest weight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    ctrl_ids = asset.indexing.ctrl_ids
+    speed = asset.data.joint_vel[:, ctrl_ids].norm(dim=-1)
+    return f_tol(speed, 0.0, v_free, margin, value_at_margin) * _post_gate(
+        asset, height_threshold, band=band
+    )
+
+
+def standing_alive_bonus(
+    env: ManagerBasedRlEnv,
+    height_threshold: float = _HOME_HEIGHT,
+    band: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Small continuous 'alive' bonus for BEING upright at standing height [B,].
+
+    Returns the height×upright gate itself (in [0, 1]): a smooth per-step reward for
+    every step spent standing, so the policy is encouraged to STAY up (duration), not
+    only to reach the height once. Kept at LOW weight — post_base_height already rewards
+    being at the target height, so this only adds a gentle survival incentive and must
+    not dominate the stability shaping.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    return _post_gate(asset, height_threshold, band=band)
+
+
+_SYMMETRY_MIRROR_CACHE_ATTR = "_symmetry_mirror_cache"
+
+
+def joint_symmetry_mirror(
+    env: ManagerBasedRlEnv,
+    joint_weights: dict[str, float],
+    scale: float = 1.0,
+    kp: float = 4.0,
+    height_threshold: float = H_STAGE2,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward LEFT/RIGHT joints MIRRORING each other — no HOME target [B,].
+
+    metric = weighted mean over joint FAMILIES of (q_left − sign·q_right)², where
+    ``sign`` is the sagittal mirror sign (_MIRROR_SIGN: +1 symmetric, −1 anti-symmetric).
+    reward = scale · exp(−kp · metric) · gate, maximal (=scale) only when the two sides
+    perfectly mirror. Purely RELATIONAL: it asks the sides to match each OTHER, never to
+    match any absolute pose, so it does not re-introduce HOME prescription. The degenerate
+    'both limbs identically wrong' basin (e.g. both arms behind the back) is ruled out by
+    arms_in_front. ``joint_weights`` keys are joint FAMILY names (no left_/right_ prefix).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = getattr(env, _SYMMETRY_MIRROR_CACHE_ATTR, None)
+    if cache is None:
+        names = asset.joint_names
+        name_to_id = {n: i for i, n in enumerate(names)}
+        left_ids, right_ids, signs, weights = [], [], [], []
+        for family, w in (joint_weights or {}).items():
+            if family not in _MIRROR_SIGN:
+                raise ValueError(
+                    f"joint_symmetry_mirror: unknown joint family '{family}' — "
+                    f"must be one of {sorted(_MIRROR_SIGN)}"
+                )
+            left_name, right_name = f"left_{family}_joint", f"right_{family}_joint"
+            if left_name not in name_to_id or right_name not in name_to_id:
+                raise ValueError(
+                    f"joint_symmetry_mirror: joint pair '{left_name}'/'{right_name}' "
+                    "not found on the asset"
+                )
+            left_ids.append(name_to_id[left_name])
+            right_ids.append(name_to_id[right_name])
+            signs.append(_MIRROR_SIGN[family])
+            weights.append(w)
+        w_t = torch.tensor(weights, device=env.device)
+        cache = {
+            "left_ids": torch.tensor(left_ids, dtype=torch.long, device=env.device),
+            "right_ids": torch.tensor(right_ids, dtype=torch.long, device=env.device),
+            "sign": torch.tensor(signs, device=env.device),
+            "w": w_t,
+            "n_w": w_t.sum().clamp(min=1e-6),
+        }
+        setattr(env, _SYMMETRY_MIRROR_CACHE_ATTR, cache)
+    q = asset.data.joint_pos
+    err = q[:, cache["left_ids"]] - cache["sign"] * q[:, cache["right_ids"]]  # [B, P]
+    metric = torch.sum(cache["w"] * err.pow(2), dim=1) / cache["n_w"]  # [B]
+    return scale * torch.exp(-kp * metric) * _post_gate(
+        asset, height_threshold, ramp_from=ramp_from
+    )
+
+
 _JOINT_VEL_LIMIT_CACHE = "_joint_vel_limit_cache"
 _ARM_VEL_SOFT_LIMIT_CACHE = "_arm_vel_soft_limit_cache"
 

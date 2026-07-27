@@ -48,7 +48,10 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         # improving. Amplifies posture advantages where they matter; task/style
         # (floor-phase + rise shaping, both healthy) untouched.
         algorithm=MultiCriticPpoAlgorithmCfg(
-            reward_group_weights=(2.5, 2.2, 0.1, 1.6),
+            # v23: post_task 1.6 -> 1.0. The 1.6 bump (v21) existed to amplify the
+            # exact-HOME-pose terms (post_home_pose_l2/standing_posture/upper_body_posture),
+            # which are now disabled (weight 0). Revert to the pre-plateau balance.
+            reward_group_weights=(2.5, 2.2, 0.1, 1.0),
             # L2C2 smoothness: Lipschitz-continuity penalty on the actor and each critic,
             # added to the loss every update (lambda_actor=1.0, lambda_critic=0.1 per critic).
             l2c2_actor_coef=1.0,

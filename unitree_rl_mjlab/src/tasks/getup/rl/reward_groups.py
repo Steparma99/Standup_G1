@@ -76,6 +76,12 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "post_feet_yaw": "post_task",
     "com_over_support": "post_task",
     "stable_success_hold": "post_task",
+    # v23 functional final-pose terms (exact-HOME imitation terms above kept at
+    # weight 0 in env_cfgs.py; entries stay so the map still covers them).
+    "arms_in_front": "post_task",
+    "post_joint_stillness": "post_task",
+    "standing_alive_bonus": "post_task",
+    "joint_symmetry_mirror": "post_task",
 }
 
 
