@@ -481,28 +481,75 @@ def stable_success_hold(
     env: ManagerBasedRlEnv,
     n_hold: int = 50,
     height_threshold: float = 0.65,
+    max_base_lin_vel: float = 0.5,
+    max_base_ang_vel: float = 1.0,
+    max_joint_speed: float = 1.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward staying above the standing height for n_hold consecutive steps [B].
+    """Reward holding a STILL stand for n_hold consecutive steps [B].
 
     Spec: "stable success hold — deve restare in piedi per N step, non solo
-    raggiungere altezza per un frame". Returns 1.0 only after the robot has
-    been continuously above `height_threshold` for `n_hold` steps (0.5 s at
-    100 Hz). Also tracks whether the robot has ever stood (used by the
-    standing_fall_timeout termination).
+    raggiungere altezza per un frame". Returns 1.0 only after the robot has held
+    a QUIET stand — above ``height_threshold`` AND moving slowly — continuously
+    for ``n_hold`` steps.
+
+    v25 change (the point of this run): the hold used to gate on pelvis height
+    ALONE, so a robot that reached 0.65 m and then wobbled / bounced / drifted in
+    place collected the full weight-10 reward the whole time — the single
+    highest-weighted post-task term was structurally BLIND to the "stands but
+    never settles" failure the videos show. Now the counter only advances while
+    the robot is also still: base linear speed < ``max_base_lin_vel`` (m/s),
+    horizontal base angular speed < ``max_base_ang_vel`` (rad/s), and RMS
+    per-joint speed < ``max_joint_speed`` (rad/s). Any spike on ANY of these
+    resets the counter, exactly as dipping below the height threshold already
+    did — so a genuinely held, motionless pose is the only way to bank the
+    reward.
+
+    Thresholds are deliberately GENEROUS (well above the post_base_*/
+    post_joint_stillness dead-zones) so small settling adjustments still count as
+    a hold — the goal here is to kill gross wobble, not to demand perfect
+    stillness (that gradient is what the dead-zoned post_* stillness rewards are
+    for). They are exposed as params so they can be tuned from the config without
+    a code change; loosen them if fall_after_success spikes (the counter is too
+    strict), tighten them if the final pose still visibly drifts.
+
+    ``ever_stood`` is intentionally kept on the height-only condition so the
+    standing_fall_timeout / no_progress_timeout exemption logic that reads it is
+    unchanged by this reward-shaping tweak. A separate ``hold_still_ok`` flag is
+    stashed for the diagnostic metric (see metrics.hold_stillness_fraction).
     """
     asset: Entity = env.scene[asset_cfg.name]
     state = get_episode_state(env, asset)
     h = asset.data.root_link_pos_w[:, 2]
     above = h > height_threshold
-    # Increment counter while above, reset to 0 the moment the robot dips below.
+
+    # Stillness gate: reuse the exact velocity channels the post_base_* /
+    # post_joint_stillness dead-zone rewards read, but as HARD cutoffs here.
+    base_lin_speed = asset.data.root_link_lin_vel_b[:, :3].norm(dim=1)
+    base_ang_speed = asset.data.root_link_ang_vel_b[:, :2].norm(dim=1)
+    ctrl_ids = asset.indexing.ctrl_ids
+    joint_speed = asset.data.joint_vel[:, ctrl_ids].pow(2).mean(dim=-1).sqrt()  # RMS
+    still = (
+        (base_lin_speed < max_base_lin_vel)
+        & (base_ang_speed < max_base_ang_vel)
+        & (joint_speed < max_joint_speed)
+    )
+    holding = above & still
+
+    # Increment counter while holding a still stand, reset the moment either the
+    # height OR the stillness condition is broken.
     state["standing_counter"] = torch.where(
-        above,
+        holding,
         state["standing_counter"] + 1,
         torch.zeros_like(state["standing_counter"]),
     )
-    # Once the robot has reached standing height in this episode, remember it.
+    # Once the robot has reached standing HEIGHT in this episode, remember it
+    # (height-only, unchanged — feeds the fall/no-progress terminations).
     state["ever_stood"] = state["ever_stood"] | above
+    # Diagnostic flags for metrics.hold_stillness_fraction (no training effect):
+    # is the robot above standing height, and if so is it also holding still?
+    state["stand_height_ok"] = above
+    state["stand_still_ok"] = holding
     return (state["standing_counter"] >= n_hold).float()
 
 

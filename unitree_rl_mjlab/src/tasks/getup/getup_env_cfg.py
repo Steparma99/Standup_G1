@@ -373,6 +373,9 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # --- P1.2: Success metrics ---
         "success/candidate": MetricsTermCfg(func=mdp.success_candidate),
         "success/stable_hold": MetricsTermCfg(func=mdp.stable_success_active),
+        # v25 diagnostic: fraction of steps in a STILL stand (height + low
+        # velocity). Compare vs success/candidate — the gap is "stands but wobbles".
+        "success/hold_still_fraction": MetricsTermCfg(func=mdp.hold_stillness_fraction),
         "success/ever_stood": MetricsTermCfg(func=mdp.ever_stood_fraction),
         "success/fall_after_success": MetricsTermCfg(func=mdp.fall_after_success_active),
         # --- P1.2: Termination reason distribution ---
@@ -1142,7 +1145,18 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # post-standing exemption all depend on.
         "stable_success_hold": RewardTermCfg(
             func=mdp.stable_success_hold, weight=10.0,
-            params={"n_hold": 15, "height_threshold": 0.65, "asset_cfg": SceneEntityCfg("robot")},
+            # v25: the hold now requires STILLNESS, not just height — the counter
+            # resets on gross wobble (base/joint speed above these cutoffs), so the
+            # weight-10 success reward can no longer be farmed by a standing-but-
+            # oscillating pose. Cutoffs are generous (kill gross wobble, not small
+            # settling); loosen if fall_after_success spikes, tighten if the final
+            # pose still visibly drifts. Watch success/hold_still_fraction.
+            params={
+                "n_hold": 15, "height_threshold": 0.65,
+                "max_base_lin_vel": 0.5, "max_base_ang_vel": 1.0,
+                "max_joint_speed": 1.0,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
         ),
         # v23 FUNCTIONAL final-pose terms (replace the exact-HOME imitation terms,
         # which are set to weight 0 in config/g1/env_cfgs.py). Specify the objective —

@@ -723,6 +723,14 @@ def get_episode_state(env: "ManagerBasedRlEnv", asset: "Entity") -> dict:
         "standing_counter": torch.zeros(n, device=device, dtype=torch.long),
         # True once the robot has been above the standing threshold in this episode.
         "ever_stood": torch.zeros(n, device=device, dtype=torch.bool),
+        # Diagnostic flags written each step by the stable_success_hold reward and
+        # read by metrics.hold_stillness_fraction (no training effect): whether the
+        # robot is currently above standing height, and whether it is ALSO holding
+        # still (height + low base/joint velocity). Their ratio shows how much gross
+        # wobble is costing the stillness-gated hold. Initialised False so the metric
+        # is safe on step 0 before the reward has run.
+        "stand_height_ok": torch.zeros(n, device=device, dtype=torch.bool),
+        "stand_still_ok": torch.zeros(n, device=device, dtype=torch.bool),
         # True once the pelvis has reached the HOME height (~0.72 m) in this episode.
         # Latches the hand-contact penalty OFF for the rest of the episode so a later
         # fall does not dump a huge contact penalty on an already-successful stand.
@@ -758,6 +766,8 @@ def reset_episode_state(
     state["prev_pg_x"][env_ids] = asset.data.projected_gravity_b[env_ids, 0]
     state["standing_counter"][env_ids] = 0
     state["ever_stood"][env_ids] = False
+    state["stand_height_ok"][env_ids] = False
+    state["stand_still_ok"][env_ids] = False
     state["ever_reached_home"][env_ids] = False
     state["fall_counter"][env_ids] = 0
     state["best_height"][env_ids] = asset.data.root_link_pos_w[env_ids, 2]

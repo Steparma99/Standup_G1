@@ -102,7 +102,12 @@ _BETA_MIN                 = 0.25   # floor (HoST fixed-beta ablation value)
 _BETA_SUCCESS_HEAD_HEIGHT = 0.75   # was 0.90 — lowered to H_STAGE2+0.10 so curriculum activates once robot learns to stand
 # Fix 1 — beta only decays after a GENUINE held stand (head height above threshold
 # WHILE both feet planted, held this many consecutive steps), not a one-frame spike.
-_BETA_HOLD_STEPS          = 50
+# v25: 50 -> 15 to MATCH the stable_success_hold reward's n_hold. 15 steps (0.15 s
+# @100 Hz) still rejects one-frame spikes (Fix 1's purpose) but stops beta's own
+# "genuine stand" bar from being ~3x stricter than the reward that defines success —
+# part of why beta_success_ema sat far below the reward's stable_hold and pinned the
+# circuit breaker (below) in the paused state.
+_BETA_HOLD_STEPS          = 15
 # Fix 2 — restore authority (bump beta up) after this many consecutive failed
 # episodes, so a regressed env is not locked at the low-authority floor forever.
 _BETA_RAMP_UP_AFTER_FAILURES = 10   # was 20 — recover authority faster (matches assist)
@@ -122,11 +127,20 @@ _BETA_DECAY_COOLDOWN_EPISODES = 6
 # fraction across resetting envs and, when it drops below _BETA_PAUSE_BELOW,
 # halts ALL beta decay and nudges beta back up each episode until the EMA
 # recovers above _BETA_RESUME_ABOVE (hysteresis gap prevents flapping).
-# Healthy stable_hold plateaus at ~0.80, so pause at 0.65 catches the bleed well
-# before the 0.49 wreck v11 reached. Logged as curriculum/beta_success_ema and
-# curriculum/beta_paused.
-_BETA_PAUSE_BELOW    = 0.65
-_BETA_RESUME_ABOVE   = 0.75
+# v25 RECALIBRATION — the 0.65/0.75 pair assumed a healthy operating point where
+# stable_hold plateaus at ~0.80. This run never gets there: stable_hold sits at
+# ~0.28 and the genuine-stand EMA is lower still, so the breaker tripped to PAUSED
+# on the very first resumed episode and NEVER recovered — with beta frozen at 1.0,
+# the policy keeps full action noise, can't hold a quiet stand, so success can't
+# rise above resume_above, so the breaker stays paused: a hard deadlock (confirmed
+# by curriculum/beta_rescaler == 1.0000 for the entire v24 run). Lowered so the
+# breaker permits decay at the CURRENTLY achievable success rate while still
+# catching a true collapse toward zero. The 0.20 hysteresis gap prevents flapping.
+# RAISE these back toward 0.55/0.70 once stable_hold climbs above ~0.6 (the
+# collapse-protection regime the original values were meant for). Logged as
+# curriculum/beta_success_ema and curriculum/beta_paused — watch both.
+_BETA_PAUSE_BELOW    = 0.15
+_BETA_RESUME_ABOVE   = 0.35
 _BETA_RECOVERY_STEP  = 0.0025  # per-episode upward nudge while paused (~decrement/cooldown pace)
 _BETA_EMA_ALPHA      = 0.5     # EMA time constant ~2 population-generations of episodes
 

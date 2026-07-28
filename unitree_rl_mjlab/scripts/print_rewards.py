@@ -45,8 +45,21 @@ HEALTH_TAGS = [
     "Episode_Metrics/success/ever_stood",
     "Episode_Metrics/success/stable_hold",
     "Episode_Metrics/success/fall_after_success",
+    "Episode_Metrics/success/hold_still_fraction",
     "Episode_Metrics/curriculum/assistance_force",
     "Episode_Metrics/curriculum/beta_rescaler",
+    # v25: the circuit-breaker internals — beta_paused ~1.0 with beta_success_ema
+    # below _BETA_PAUSE_BELOW is the "beta frozen at 1.0" deadlock this run fixes.
+    "Episode_Metrics/curriculum/beta_success_ema",
+    "Episode_Metrics/curriculum/beta_paused",
+    # v25: policy noise std + action smoothness — the "std keeps growing / actions
+    # get jerkier" symptoms. mean_std should now trend DOWN; rate/acc_mean should
+    # stop climbing once beta actually decays.
+    "Policy/mean_std",
+    "Loss/entropy",
+    "Loss/learning_rate",
+    "Episode_Metrics/action/rate_mean",
+    "Episode_Metrics/action/acc_mean",
     "Episode_Metrics/reward_group/task",
     "Episode_Metrics/reward_group/style",
     "Episode_Metrics/reward_group/regularization",

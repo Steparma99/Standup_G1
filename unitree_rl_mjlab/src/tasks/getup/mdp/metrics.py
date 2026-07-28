@@ -217,6 +217,26 @@ def ever_stood_fraction(
     return state["ever_stood"].float()
 
 
+def hold_stillness_fraction(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Fraction of steps spent holding a STILL stand [B,].
+
+    Returns the stand_still_ok flag (above standing height AND low base/joint
+    velocity) written each step by the stable_success_hold reward (v25 stillness
+    gate). Episode-averaged, this is the fraction of the episode spent in a quiet
+    stand. Compare it against ``success/candidate`` / ``stage/stage3`` (fraction
+    of steps merely ABOVE standing height): the GAP between them is exactly the
+    "stands but wobbles" time — the failure this run targets. As the final pose
+    stabilises, this metric should rise toward candidate. Purely diagnostic (no
+    training effect).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    state = get_episode_state(env, asset)
+    return state["stand_still_ok"].float()
+
+
 def fall_after_success_active(
     env: "ManagerBasedRlEnv",
     height_threshold: float = _H_STANDING,
