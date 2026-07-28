@@ -95,6 +95,13 @@ _ASSIST_UNACTUATED_STEPS       = 60      # no assist force during the unactuated
 # episode length. The policy observes its beta (beta_rescaler obs term).
 # ---------------------------------------------------------------------------
 _BETA_CURRICULUM_ENABLE   = True
+# v25 MANUAL CURRICULUM: freeze beta at its initial value (set per-run by
+# GETUP_TRAIN_INITIAL_BETA) and step it down DELIBERATELY between runs, once the
+# policy is demonstrably good at the current level. True = frozen (no automatic
+# decay/ramp/breaker); flip to False to restore the automatic success-gated
+# annealing. Introduced after the auto-curriculum decayed beta faster than the
+# policy could adapt and collapsed the run (v25 Pass A).
+_BETA_FREEZE              = True
 _BETA_INITIAL             = 1.0
 _BETA_DECREMENT           = 0.01   # was 0.02 — pace authority withdrawal with the
                                    # slower assist-force decay (avoid crutch-dependence)
@@ -899,7 +906,11 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                   "(freeze support removed in v20 — beta always anneals in training)")
         if _train_beta not in (None, ""):
             print(f"[getup] TRAIN beta curriculum starting at {_initial_beta:.3f} "
-                  "(GETUP_TRAIN_INITIAL_BETA override, continues annealing normally)")
+                  "(GETUP_TRAIN_INITIAL_BETA override)")
+        if _BETA_FREEZE:
+            print(f"[getup] beta curriculum FROZEN at {_initial_beta:.3f} "
+                  "(_BETA_FREEZE=True — no auto decay/ramp/breaker; step down "
+                  "manually via GETUP_TRAIN_INITIAL_BETA between runs)")
         _decrement = _BETA_DECREMENT
         _ramp_up_step = _BETA_RAMP_UP_STEP
         _pause_below = _BETA_PAUSE_BELOW
@@ -911,6 +922,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot"),
                 "body_name": "torso_link",
                 "initial_beta": _initial_beta,
+                "freeze": _BETA_FREEZE,
                 "decrement": _decrement,
                 "beta_min": _BETA_MIN,
                 "success_head_height": _BETA_SUCCESS_HEAD_HEIGHT,

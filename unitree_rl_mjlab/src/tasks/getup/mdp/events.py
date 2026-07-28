@@ -533,6 +533,14 @@ class BetaRescalerCurriculum:
         self._decrement = float(p["decrement"])
         self._beta_min = float(p["beta_min"])
         self._success_head_height = float(p["success_head_height"])
+        # v25 manual curriculum: when True, beta is HELD FIXED at initial_beta for
+        # the whole run — no decrement, no fail-ramp, no breaker nudge. The policy
+        # learns at a fixed authority level; beta is stepped down DELIBERATELY
+        # between runs (via GETUP_TRAIN_INITIAL_BETA), never automatically. This is
+        # the "stationary-beta reconverge" the v20 comment said must be a code
+        # change, not a leaky env var. The success EMA is still tracked/logged so
+        # we can see when the policy is good enough to step beta down.
+        self._freeze = bool(p.get("freeze", False))
         # Fix 1 — stable-hold decay gate (mirrors AssistanceCurriculum): beta only
         # decays after a GENUINE held stand (head height above threshold WHILE both
         # feet planted, for hold_steps consecutive steps), not a one-frame spike.
@@ -641,51 +649,56 @@ class BetaRescalerCurriculum:
             self._success_ema = (
                 (1.0 - k) * self._success_ema + k * float(held.float().mean())
             )
-        if self._paused:
-            if self._success_ema > self._resume_above:
-                self._paused = False
-        elif self._success_ema < self._pause_below:
-            self._paused = True
-        cooldown = self._decay_cooldown_counter[env_ids]
-        can_decay = cooldown == 0
-        decayed = held & can_decay
-        if self._paused:
-            # Breaker engaged: the population is not keeping up with the current
-            # beta — halt ALL decay (every env, regardless of its own cooldown)
-            # and actively walk beta back up a little each episode until the
-            # population success EMA recovers above resume_above.
-            decayed = torch.zeros_like(decayed)
-            self._beta[env_ids] = self._beta[env_ids] + self._recovery_step
-        # Fix 1 — decrement beta only after a genuine held stand (binary credit),
-        # not a one-frame head-height touch, so action authority is never withdrawn
-        # on a false positive. Fix 3 — and only if this env's decay cooldown has
-        # elapsed, rate-limiting how fast the population-mean beta can fall.
-        self._beta[env_ids] = torch.where(
-            decayed, self._beta[env_ids] - self._decrement, self._beta[env_ids]
-        )
-        cooldown = torch.where(
-            decayed,
-            torch.full_like(cooldown, self._decay_cooldown),
-            torch.clamp(cooldown - 1, min=0),
-        )
-        self._decay_cooldown_counter[env_ids] = cooldown
-        # Fix 2 — reversible crutch: after ramp_up_after consecutive failed
-        # episodes, bump beta back up (restore authority); streak resets on any
-        # held stand or bump. Symmetric with the assist-force re-ramp.
-        streak = self._fail_streak[env_ids]
-        streak = torch.where(held, torch.zeros_like(streak), streak + 1)
-        ramp = streak >= self._ramp_up_after
-        self._beta[env_ids] = torch.where(
-            ramp, self._beta[env_ids] + self._ramp_up_step, self._beta[env_ids]
-        )
-        self._fail_streak[env_ids] = torch.where(
-            ramp, torch.zeros_like(streak), streak
-        )
-        # Clamp to [beta_min, initial_beta] (re-ramp never exceeds the start).
-        self._beta[env_ids] = torch.clamp(
-            self._beta[env_ids], min=self._beta_min, max=self._initial_beta
-        )
-        # Clear per-episode hold state for the reset envs.
+        # v25 FREEZE: hold beta fixed — skip ALL mutation (breaker, decay, ramp).
+        # The EMA above is still updated (so we can watch competence and decide
+        # when to step beta down manually), and the per-episode latches below are
+        # still cleared. Beta stays exactly at initial_beta for every env.
+        if not self._freeze:
+            if self._paused:
+                if self._success_ema > self._resume_above:
+                    self._paused = False
+            elif self._success_ema < self._pause_below:
+                self._paused = True
+            cooldown = self._decay_cooldown_counter[env_ids]
+            can_decay = cooldown == 0
+            decayed = held & can_decay
+            if self._paused:
+                # Breaker engaged: the population is not keeping up with the current
+                # beta — halt ALL decay (every env, regardless of its own cooldown)
+                # and actively walk beta back up a little each episode until the
+                # population success EMA recovers above resume_above.
+                decayed = torch.zeros_like(decayed)
+                self._beta[env_ids] = self._beta[env_ids] + self._recovery_step
+            # Fix 1 — decrement beta only after a genuine held stand (binary credit),
+            # not a one-frame head-height touch, so action authority is never withdrawn
+            # on a false positive. Fix 3 — and only if this env's decay cooldown has
+            # elapsed, rate-limiting how fast the population-mean beta can fall.
+            self._beta[env_ids] = torch.where(
+                decayed, self._beta[env_ids] - self._decrement, self._beta[env_ids]
+            )
+            cooldown = torch.where(
+                decayed,
+                torch.full_like(cooldown, self._decay_cooldown),
+                torch.clamp(cooldown - 1, min=0),
+            )
+            self._decay_cooldown_counter[env_ids] = cooldown
+            # Fix 2 — reversible crutch: after ramp_up_after consecutive failed
+            # episodes, bump beta back up (restore authority); streak resets on any
+            # held stand or bump. Symmetric with the assist-force re-ramp.
+            streak = self._fail_streak[env_ids]
+            streak = torch.where(held, torch.zeros_like(streak), streak + 1)
+            ramp = streak >= self._ramp_up_after
+            self._beta[env_ids] = torch.where(
+                ramp, self._beta[env_ids] + self._ramp_up_step, self._beta[env_ids]
+            )
+            self._fail_streak[env_ids] = torch.where(
+                ramp, torch.zeros_like(streak), streak
+            )
+            # Clamp to [beta_min, initial_beta] (re-ramp never exceeds the start).
+            self._beta[env_ids] = torch.clamp(
+                self._beta[env_ids], min=self._beta_min, max=self._initial_beta
+            )
+        # Clear per-episode hold state for the reset envs (ALWAYS, even frozen).
         self._hold_counter[env_ids] = 0
         self._stable_held[env_ids] = False
 
