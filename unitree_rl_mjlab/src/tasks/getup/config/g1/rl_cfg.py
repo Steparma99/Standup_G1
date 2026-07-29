@@ -61,11 +61,13 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             # objective sums L(phi_i) = ||return_i - V_i||^2 over the 4 group critics.
             use_clipped_value_loss=False,
             clip_param=0.2,
-            # v21: 0.005 -> 0.01 — the v20 run sat in a local optimum for 1800 its
-            # (stable_hold flat ~0.25, posture terms flat) with the policy still
-            # standing crooked; a stronger entropy bonus is the standard lever
-            # against premature convergence. Revert if KL/entropy show instability.
-            entropy_coef=0.01,
+            # v26: 0.01 -> 0.005, reverting v21's bump. entropy/mean_std climbed
+            # monotonically for 500+ its post-v21 with success metrics flat —
+            # the instability v21's comment said to revert on. The final-pose
+            # terms added since (post_joint_stillness, stable_success_hold,
+            # post_terminal_core) all reward LOW motion, which a 2x entropy
+            # bonus directly fights.
+            entropy_coef=0.005,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=5.0e-4,

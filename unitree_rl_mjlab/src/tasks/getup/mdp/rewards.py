@@ -2198,6 +2198,167 @@ def terminal_gate(
     return _post_gate(asset, height_threshold) * g_feet
 
 
+# ---------------------------------------------------------------------------
+# v27: FUNCTIONAL task-space ARM/HAND terminal-pose terms. Decompose the single
+# coarse `arms_in_front` (forward-X only, now weight 0) into unambiguous,
+# individually-logged factors — hand PLACEMENT (3D torso-frame box, worst hand),
+# ELBOW flexion band, shoulder-hand OVEREXTENSION, and self-collision CLEARANCE —
+# mirroring the v26 leg terminal-region family. Bands calibrated to the measured
+# HOME arm pose in the torso frame: palm x≈0.157, |y|≈0.227, z≈-0.124,
+# shoulder→palm≈0.422, radial≈0.276. All gated to the near-standing HOLD window
+# (_HOME_HEIGHT, ramp_from=None) so the two PENALTIES never fire during floor
+# push-off, when the hands are legitimately near the body/ground. Symmetry is a
+# DEFERRED later pass (region first) — see joint_symmetry_mirror below.
+# ---------------------------------------------------------------------------
+
+_ARM_TORSO_ID_CACHE = "_arm_torso_id"
+_ARM_OVEREXT_SHOULDER_IDS = "_arm_overext_shoulder_ids"
+_ARM_ELBOW_JOINT_IDS = "_arm_elbow_joint_ids"
+
+
+def _palm_offset_torso_frame(
+    env: "ManagerBasedRlEnv",
+    asset: Entity,
+    torso_body: str,
+    site_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Palm site positions in the TORSO frame [B, P, 3] (x=fwd, y=left, z=up).
+
+    Same projection as ``arms_in_front``: the FULL torso quaternion (yaw+roll+pitch),
+    so forward/lateral/up are the trunk's own axes as it tilts. Shared by
+    ``arm_hand_box`` (placement) and ``arm_clearance`` (radial proxy).
+    """
+    torso_ids = _cached_body_ids(env, asset, (torso_body,), _ARM_TORSO_ID_CACHE)  # [1]
+    torso_pos = asset.data.body_link_pos_w[:, torso_ids, :]     # [B, 1, 3]
+    torso_quat = asset.data.body_link_quat_w[:, torso_ids, :]   # [B, 1, 4]
+    palm_w = asset.data.site_pos_w[:, site_ids, :]              # [B, P, 3]
+    quat = torso_quat.expand(-1, palm_w.shape[1], -1)           # [B, P, 4]
+    return quat_apply_inverse(quat, palm_w - torso_pos)         # [B, P, 3]
+
+
+def arm_hand_box(
+    env: ManagerBasedRlEnv,
+    x_lo: float = 0.12,
+    x_hi: float = 0.30,
+    y_lo: float = 0.12,
+    y_hi: float = 0.32,
+    z_lo: float = -0.30,
+    z_hi: float = 0.00,
+    margin: float = 0.10,
+    value_at_margin: float = 0.1,
+    torso_body: str = "torso_link",
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward each palm sitting in a comfortable 3D BOX in the torso frame [B,].
+
+    Worst-hand geometric mean of three tolerance bands per palm:
+      - x (forward) in [x_lo, x_hi]: in front of the trunk, not pinned, not extended.
+      - y_out       in [y_lo, y_hi]: OUTWARD lateral (y_out = +y for the LEFT palm,
+        −y for the RIGHT): enforces left-hand-left / right-hand-right; a hand crossed
+        to the wrong side has y_out < 0 → ~0 (same signed trick as leg_width_ordering).
+      - z (up)      in [z_lo, z_hi]: hand height between pelvis and lower torso.
+    ``r_hand = (f_tol(x)·f_tol(y_out)·f_tol(z))^(1/3)``; return ``min`` over the two
+    hands × gate, so one badly-placed hand cannot hide behind a well-placed one
+    (worst-of, like shank_worst_leg). Replaces the forward-only ``arms_in_front``.
+    Bands calibrated to HOME (x≈0.157, |y|≈0.227, z≈−0.124). asset_cfg carries the two
+    palm sites in ORDER (left, right).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    off_b = _palm_offset_torso_frame(env, asset, torso_body, asset_cfg.site_ids)  # [B,P,3]
+    assert off_b.shape[1] == 2, "arm_hand_box expects exactly 2 palm sites (L, R)"
+    x = off_b[..., 0]                                              # [B, 2]
+    z = off_b[..., 2]                                              # [B, 2]
+    # OUTWARD lateral: +y for the left palm (site 0), −y for the right (site 1).
+    sign = torch.tensor([1.0, -1.0], device=env.device).view(1, -1)  # [1, 2]
+    y_out = off_b[..., 1] * sign                                   # [B, 2]
+    r_x = f_tol(x, x_lo, x_hi, margin, value_at_margin)
+    r_y = f_tol(y_out, y_lo, y_hi, margin, value_at_margin)
+    r_z = f_tol(z, z_lo, z_hi, margin, value_at_margin)
+    r_hand = (r_x * r_y * r_z).clamp(min=0.0).pow(1.0 / 3.0)       # [B, 2]
+    worst = r_hand.min(dim=1).values                              # [B]
+    return worst * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def arm_elbow_flexion(
+    env: ManagerBasedRlEnv,
+    e_lo: float = 0.35,
+    e_hi: float = 0.95,
+    margin: float = 0.15,
+    value_at_margin: float = 0.1,
+    elbow_joints: tuple[str, ...] = ("left_elbow_joint", "right_elbow_joint"),
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward both elbows sitting in a comfortable FLEXION band [B,].
+
+    ``f_tol(q_elbow, [e_lo, e_hi])`` averaged over the two elbows × gate. Rejects a
+    fully-straight (locked, q≈0) arm and a hyper-flexed one; centered on HOME 0.60.
+    Replaces prescribing 'arms outstretched' — a bent elbow is what a natural relaxed
+    stand shows. Both elbows share sign, so one band serves both.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = _cached_joint_ids(env, asset, elbow_joints, _ARM_ELBOW_JOINT_IDS)
+    q = asset.data.joint_pos[:, ids]                              # [B, 2]
+    r = f_tol(q, e_lo, e_hi, margin, value_at_margin).mean(dim=1)  # [B]
+    return r * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def arm_overextension(
+    env: ManagerBasedRlEnv,
+    l_max: float = 0.50,
+    shoulder_bodies: tuple[str, ...] = (
+        "left_shoulder_pitch_link", "right_shoulder_pitch_link",
+    ),
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize a hand reaching past a max arm length [B,] (use NEGATIVE weight).
+
+    ``pen = mean_hands ReLU(‖palm − shoulder‖ − l_max)² × gate`` — a squared hinge
+    (dead-zone below l_max, quadratic beyond), the same robust form as shank_worst_leg
+    / hand_contact_penalty. Discourages the straight-locked over-reach a plain
+    'arms in front' term can encourage. l_max sits just above the HOME bent-elbow reach
+    (≈0.42) so HOME is free and only genuine over-extension is charged. asset_cfg
+    carries the palm sites (order left, right); shoulder_bodies the matching proximal
+    links.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    sh_ids = _cached_body_ids(env, asset, shoulder_bodies, _ARM_OVEREXT_SHOULDER_IDS)
+    palm_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]      # [B, 2, 3]
+    sh_w = asset.data.body_link_pos_w[:, sh_ids, :]              # [B, 2, 3]
+    d = torch.norm(palm_w - sh_w, dim=-1)                        # [B, 2]
+    pen = torch.clamp(d - l_max, min=0.0).pow(2).mean(dim=1)     # [B]
+    return pen * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def arm_clearance(
+    env: ManagerBasedRlEnv,
+    d_safe: float = 0.15,
+    torso_body: str = "torso_link",
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize a palm pinned against the trunk, BEFORE contact [B,] (NEGATIVE weight).
+
+    Torso-frame radial proxy: ``d_radial = sqrt(x_b² + y_b²)`` is the palm's horizontal
+    distance from the trunk's central (vertical) axis. ``pen = mean_hands
+    ReLU(d_safe − d_radial)² × gate`` — a squared hinge that grows as a hand comes
+    within d_safe of the torso axis (jammed against chest/back), a PREDICTIVE margin the
+    force-based hand_contact_penalty only sees on actual contact. d_safe < HOME radial
+    (≈0.276) so a normal stand is free. asset_cfg carries the palm sites.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    off_b = _palm_offset_torso_frame(env, asset, torso_body, asset_cfg.site_ids)  # [B,P,3]
+    d_radial = torch.sqrt(off_b[..., 0].pow(2) + off_b[..., 1].pow(2))  # [B, P]
+    pen = torch.clamp(d_safe - d_radial, min=0.0).pow(2).mean(dim=1)    # [B]
+    return pen * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
 _SYMMETRY_MIRROR_CACHE_ATTR = "_symmetry_mirror_cache"
 
 

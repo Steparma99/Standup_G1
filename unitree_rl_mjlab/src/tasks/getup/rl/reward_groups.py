@@ -86,6 +86,11 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "post_terminal_core": "post_task",
     "leg_width_ordering": "post_task",
     "shank_worst_leg": "post_task",
+    # v27 task-space ARM/HAND terminal-pose terms (arms_in_front decomposed).
+    "arm_hand_box": "post_task",
+    "arm_elbow_flexion": "post_task",
+    "arm_overextension": "post_task",
+    "arm_clearance": "post_task",
 }
 
 

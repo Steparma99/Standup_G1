@@ -780,11 +780,23 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["post_bilateral_symmetry"].weight = 0.0  # HOME-anchored — replaced by
     #                                                      relational joint_symmetry_mirror
 
-    # v23 arms_in_front: hands IN FRONT of the torso (not pinned to body, not
-    # extended). Uses the palm sites; band [fwd_lo, fwd_hi] set in getup_env_cfg.py.
+    # v27: arms_in_front DISABLED (weight 0) — decomposed into the four task-space
+    # arm terms below (arm_hand_box / arm_elbow_flexion / arm_overextension /
+    # arm_clearance). Kept as a no-op per the v23 convention, not deleted. The
+    # forward-only band it scored is now the X axis of arm_hand_box's 3D box.
+    cfg.rewards["arms_in_front"].weight = 0.0
     cfg.rewards["arms_in_front"].params["asset_cfg"].site_names = (
         "left_palm", "right_palm",
     )
+
+    # v27 palm-site wiring for the three arm terms that read the palm sites (ORDER:
+    # left, right — arm_hand_box's signed lateral depends on site 0 = LEFT). The
+    # elbow-flexion term uses joints only (no site wiring); shoulder/elbow bodies
+    # resolve inside the reward via _cached_body_ids/_cached_joint_ids.
+    _palm_sites = ("left_palm", "right_palm")
+    cfg.rewards["arm_hand_box"].params["asset_cfg"].site_names = _palm_sites
+    cfg.rewards["arm_overextension"].params["asset_cfg"].site_names = _palm_sites
+    cfg.rewards["arm_clearance"].params["asset_cfg"].site_names = _palm_sites
     # v24: joint_symmetry_mirror REMOVED (no symmetry reward — see getup_env_cfg.py).
 
     # Both-feet grounded: needs the foot site names to check height.

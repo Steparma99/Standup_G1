@@ -12,8 +12,8 @@ Usage:
     (default: logs/rsl_rl/g1_getup relative to cwd).
 
 With --all every scalar tag in the event file is printed (useful for discovery).
-Without --all prints the standard health metrics, the CURRENT configured reward stack
-(group + weight from the G1 get-up config), and all Episode_Reward/* terms found.
+Without --all prints the standard health/loss metrics and all Episode_Reward/*
+terms found (each labeled with its group + weight from the G1 get-up config).
 """
 
 from __future__ import annotations
@@ -58,6 +58,12 @@ HEALTH_TAGS = [
     "Policy/mean_std",
     "Loss/entropy",
     "Loss/learning_rate",
+    "Loss/surrogate",
+    "Loss/value",
+    "Loss/value_task",
+    "Loss/value_style",
+    "Loss/value_regularization",
+    "Loss/value_post_task",
     "Episode_Metrics/action/rate_mean",
     "Episode_Metrics/action/acc_mean",
     "Episode_Metrics/reward_group/task",
@@ -108,23 +114,6 @@ def ordered_reward_tags(
     ]
     extras = sorted(available_reward_tags - set(ordered))
     return ordered + extras
-
-
-def print_reward_config_summary(
-    reward_meta: dict[str, RewardMeta], available: set[str]
-) -> None:
-    """Print the current reward stack with group/weight and log presence."""
-    if not reward_meta:
-        return
-
-    print("\n=== CURRENT REWARD CONFIG (G1 GET-UP) ===")
-    for name, meta in reward_meta.items():
-        tag = f"Episode_Reward/{name}"
-        status = "logged in run" if tag in available else "not in run"
-        print(
-            f"{name:<30} group={meta.group:<14} "
-            f"weight={format_weight(meta.weight):>7}  {status}"
-        )
 
 
 def resolve_run_dir(run: str, logdir: str) -> str:
@@ -185,7 +174,6 @@ def main() -> None:
 
         if reward_meta_warn:
             print(f"\n{reward_meta_warn}")
-        print_reward_config_summary(reward_meta, available)
 
         # All individual reward terms (auto-discovered)
         reward_tags = ordered_reward_tags(reward_meta, available)

@@ -1235,6 +1235,48 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
             func=mdp.shank_worst_leg, weight=-3.0,
             params={"min_cos": 0.9, "asset_cfg": SceneEntityCfg("robot")},
         ),
+        # ===================================================================
+        # v27 TASK-SPACE ARM/HAND terminal-pose terms. Decompose the coarse
+        # arms_in_front (forward-X only, now weight 0 in config/g1) into four
+        # unambiguous, separately-logged factors — mirroring the v26 leg
+        # terminal-region family. Bands calibrated to the measured HOME arm pose
+        # (torso frame: palm x≈0.157, |y|≈0.227, z≈-0.124, shoulder→palm≈0.422,
+        # radial≈0.276). Palm site names ("left_palm","right_palm") are wired
+        # per-robot in config/g1/env_cfgs.py; elbow/shoulder bodies resolve inside
+        # the reward. All final-hold gated (ramp_from=None). Symmetry DEFERRED.
+        # ===================================================================
+        # Hand PLACEMENT: worst-hand 3D box (forward / outward-lateral / height) in
+        # the torso frame. Signed lateral enforces left-hand-left / right-hand-right;
+        # geometric mean per hand + worst-of so no axis and no hand can be farmed.
+        # Inherits the old arms_in_front weight (5.0) — the primary arm term.
+        "arm_hand_box": RewardTermCfg(
+            func=mdp.arm_hand_box, weight=5.0,
+            params={"x_lo": 0.12, "x_hi": 0.30, "y_lo": 0.12, "y_hi": 0.32,
+                    "z_lo": -0.30, "z_hi": 0.00, "margin": 0.10,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
+        # ELBOW flexion band (centered on HOME 0.60) — rejects locked-straight and
+        # hyper-flexed arms. Secondary tier weight.
+        "arm_elbow_flexion": RewardTermCfg(
+            func=mdp.arm_elbow_flexion, weight=2.0,
+            params={"e_lo": 0.35, "e_hi": 0.95, "margin": 0.15,
+                    "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # OVEREXTENSION penalty: squared hinge on shoulder→palm distance past l_max
+        # (just above HOME reach ≈0.42). NEGATIVE weight; final-hold gated.
+        "arm_overextension": RewardTermCfg(
+            func=mdp.arm_overextension, weight=-2.0,
+            params={"l_max": 0.50,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
+        # CLEARANCE penalty: torso-frame radial proxy, predictive anti-self-collision
+        # (palm pinned to chest/back). NEGATIVE weight; final-hold gated so it never
+        # fights the push-off phase where hands are legitimately near the body.
+        "arm_clearance": RewardTermCfg(
+            func=mdp.arm_clearance, weight=-3.0,
+            params={"d_safe": 0.15,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
     }
 
     ##
