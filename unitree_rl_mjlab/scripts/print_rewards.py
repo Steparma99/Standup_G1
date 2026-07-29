@@ -37,6 +37,11 @@ HEALTH_TAGS = [
     "Episode_Termination/ground_penetration",
     "Episode_Termination/base_vel_explosion",
     "Episode_Termination/joint_vel_explosion",
+    # v28: after-standing fall termination (ever_stood & h<0.65 for n_fall_steps) —
+    # was defined but never registered before v28; watch this drop as the arm/leg
+    # terminal-pose terms improve.
+    "Episode_Termination/standing_fall_timeout",
+    "Episode_Termination/nan",
     "Episode_Metrics/stage/stage0",
     "Episode_Metrics/stage/stage1",
     "Episode_Metrics/stage/stage2",
@@ -46,6 +51,9 @@ HEALTH_TAGS = [
     "Episode_Metrics/success/stable_hold",
     "Episode_Metrics/success/fall_after_success",
     "Episode_Metrics/success/hold_still_fraction",
+    # v26 terminal-region gate diagnostic (geometric mean of upright x
+    # double-support x feet-ground-force gate).
+    "Episode_Metrics/success/terminal_gate",
     "Episode_Metrics/curriculum/assistance_force",
     "Episode_Metrics/curriculum/beta_rescaler",
     # v25: the circuit-breaker internals — beta_paused ~1.0 with beta_success_ema
