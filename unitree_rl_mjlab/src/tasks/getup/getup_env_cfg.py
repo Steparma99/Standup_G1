@@ -1329,6 +1329,20 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         ),
+        # v28: after-standing fall termination (was defined but never registered).
+        # Failure termination (no time_out=True): once the robot has stood (ever_stood)
+        # and then stays below 0.65 m for n_fall_steps (~0.3 s), end the episode and
+        # fire is_terminated. Stops post-fall ground-farming and gives a clear "don't
+        # fall after standing" signal. Expect mean_episode_length to DROP for the
+        # stood-then-fell envs — that is the intended failure signal, not a regression.
+        "standing_fall_timeout": TerminationTermCfg(
+            func=mdp.standing_fall_timeout,
+            params={
+                "height_threshold": 0.65,
+                "n_fall_steps": 30,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        ),
     }
 
     ##

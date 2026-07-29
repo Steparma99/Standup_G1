@@ -25,7 +25,12 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
                                   # leaves headroom; adaptive-KL will shrink it).
                 "std_type": "scalar",
                 "min_std": 0.05,
-                "max_std": 2.0,
+                # v28: 2.0 -> 1.0. Policy/mean_std was ratcheting UP (0.93->1.0 and
+                # climbing) on a mature resume — the entropy bonus beating a flat
+                # terminal-phase advantage. Hard-cap the learned std at ~its current
+                # value to stop the ratchet, so the final pose (arms/legs) can settle
+                # and post-stand falls drop. Paired with entropy_coef 0.005->0.002.
+                "max_std": 1.0,
             },
         ),
         # HoST-style critic: this config is applied to EACH of the 4 group critics
@@ -67,7 +72,12 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             # terms added since (post_joint_stillness, stable_success_hold,
             # post_terminal_core) all reward LOW motion, which a 2x entropy
             # bonus directly fights.
-            entropy_coef=0.005,
+            # v28: 0.005 -> 0.002. v26's 0.01->0.005 slowed but did NOT stop the
+            # monotonic Policy/mean_std climb (0.93->1.0 over the v27 resume) while
+            # the terminal-pose terms (arm/leg region, stable_success_hold) stayed
+            # flat. The entropy bonus is fighting the low-motion final-hold reward;
+            # cut it further and hard-cap max_std=1.0 to let the pose settle.
+            entropy_coef=0.002,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=5.0e-4,
