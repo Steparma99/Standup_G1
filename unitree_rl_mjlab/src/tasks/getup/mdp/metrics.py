@@ -41,6 +41,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.utils.string import resolve_expr
 
+from .rewards import terminal_gate as _terminal_gate
 from .events import (
     _ASSIST_FORCE_ATTR,
     _BETA_CURRICULUM_ATTR,
@@ -235,6 +236,21 @@ def hold_stillness_fraction(
     asset: Entity = env.scene[asset_cfg.name]
     state = get_episode_state(env, asset)
     return state["stand_still_ok"].float()
+
+
+def terminal_gate_fraction(
+    env: "ManagerBasedRlEnv",
+    foot_sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean continuous terminal-stability gate g4 in [0, 1] [B,] (diagnostic).
+
+    Recomputes ``rewards.terminal_gate`` (height × upright × both-feet-loaded) each
+    step. Episode-averaged, this is the fraction of the episode spent in the
+    task-space "settled quiet stand" region. Purely diagnostic (no training effect);
+    watch it rise alongside the new ``post_terminal_core`` reward.
+    """
+    return _terminal_gate(env, foot_sensor_name=foot_sensor_name, asset_cfg=asset_cfg)
 
 
 def fall_after_success_active(

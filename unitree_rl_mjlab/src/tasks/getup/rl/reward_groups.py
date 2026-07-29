@@ -81,6 +81,11 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "arms_in_front": "post_task",
     "post_joint_stillness": "post_task",
     "standing_alive_bonus": "post_task",
+    # v26 task-space terminal "quiet standing" region: geometric-mean core +
+    # crossed-legs (signed lateral foot ordering) + worst-leg shank verticality.
+    "post_terminal_core": "post_task",
+    "leg_width_ordering": "post_task",
+    "shank_worst_leg": "post_task",
 }
 
 

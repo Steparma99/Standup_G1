@@ -14,7 +14,7 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
-from mjlab.utils.lab_api.math import quat_apply_inverse
+from mjlab.utils.lab_api.math import quat_apply_inverse, yaw_quat
 from mjlab.utils.string import resolve_expr
 
 from .events import get_episode_state
@@ -1991,6 +1991,211 @@ def standing_alive_bonus(
     """
     asset: Entity = env.scene[asset_cfg.name]
     return _post_gate(asset, height_threshold, band=band)
+
+
+# ---------------------------------------------------------------------------
+# Terminal "quiet standing" region (task-space, DeepMimic-style). Instead of
+# imposing an exact HOME joint configuration, these terms define WHAT a settled
+# stand IS — trunk vertical, both feet loaded, CoM over the support, and the
+# feet correctly LEFT/RIGHT ordered — with generous tolerance, and combine the
+# factors MULTIPLICATIVELY (geometric mean / product), so no single factor can
+# be farmed while another is ~0. leg_width_ordering is the direct crossed-legs
+# fix (signed lateral foot separation in the pelvis yaw-frame); post_terminal_core
+# is the geometric-mean core; terminal_gate is the continuous g4 gate (diagnostic).
+# ---------------------------------------------------------------------------
+
+
+def _pelvis_yaw_frame_xy(asset: Entity, pos_w: torch.Tensor) -> torch.Tensor:
+    """XY offset of world positions from the pelvis, in the pelvis YAW-ONLY frame.
+
+    ``pos_w`` : [B, N, 3] world positions (e.g. the two foot sites). Returns
+    [B, N, 2] = (x=forward, y=left) after subtracting the pelvis origin and
+    rotating by the INVERSE of the pelvis yaw-only orientation. Yaw-only (via
+    ``yaw_quat``) makes the result invariant to the trunk's roll/pitch — which
+    tilt heavily while getting up — and to the robot's heading, leaving a clean
+    body-lateral (y) coordinate for the left/right foot-ordering check. Mirrors
+    the torso-frame projection in ``arms_in_front`` but with a yaw-only rotation.
+    """
+    root_pos = asset.data.root_link_pos_w[:, :3].unsqueeze(1)      # [B, 1, 3]
+    yaw_q = yaw_quat(asset.data.root_link_quat_w)                  # [B, 4]
+    yaw_q = yaw_q.unsqueeze(1).expand(-1, pos_w.shape[1], -1)      # [B, N, 4]
+    offset_b = quat_apply_inverse(yaw_q, pos_w - root_pos)         # [B, N, 3]
+    return offset_b[..., :2]                                       # [B, N, 2]
+
+
+def leg_width_ordering(
+    env: ManagerBasedRlEnv,
+    dmin: float = 0.10,
+    dmax: float = 0.30,
+    margin: float = 0.10,
+    value_at_margin: float = 0.1,
+    height_threshold: float = H_STAGE2,
+    ramp_from: float | None = _POST_GATE_RAMP_FROM,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward the feet being LEFT-of-RIGHT with a comfortable lateral gap [B,].
+
+    The single most direct fix for the crossed-legs failure. The two foot sites
+    (``asset_cfg.site_ids`` = left, right) are expressed in the pelvis YAW-ONLY
+    frame and the SIGNED lateral separation ``y_L - y_R`` (body +Y = left, so a
+    correctly-ordered stance has y_L > y_R) is scored by ``f_tol`` against the band
+    [dmin, dmax] metres:
+      - crossed legs (y_L - y_R < 0)          -> ~0 (well below dmin)
+      - too narrow  (0 <= y_L - y_R < dmin)   -> Gaussian falloff toward 0
+      - good stance (dmin <= . <= dmax)       -> full reward 1.0
+      - too wide    (y_L - y_R > dmax)        -> Gaussian falloff
+    Signed (not absolute), so ORDER matters — exactly what a plain foot-distance
+    term (which uses the absolute gap) cannot see. Gated near-standing via
+    ``_post_gate``, faded in from ``ramp_from`` so the leg-crossing habit is shaped
+    through the rise, not only corrected once already standing. asset_cfg carries
+    the two foot site names.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    foot_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]       # [B, 2, 3] (L, R)
+    xy = _pelvis_yaw_frame_xy(asset, foot_w)                       # [B, 2, 2]
+    y_sep = xy[:, 0, 1] - xy[:, 1, 1]                              # y_L - y_R [B]
+    r = f_tol(y_sep, dmin, dmax, margin, value_at_margin)         # [B]
+    return r * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def shank_worst_leg(
+    env: ManagerBasedRlEnv,
+    knee_names: tuple[str, ...] = ("left_knee_link", "right_knee_link"),
+    foot_names: tuple[str, ...] = ("left_ankle_roll_link", "right_ankle_roll_link"),
+    min_cos: float = 0.9,
+    height_threshold: float = H_STAGE2,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task WORST-LEG shank-verticality penalty [B,] (use a NEGATIVE weight).
+
+    Per-leg cos = (z_knee - z_foot)/‖knee - foot‖ (1 = shank vertical). Penalty =
+    clamp(min_cos - min_over_legs(cos), 0)² — evaluated on the WORST leg (min cos)
+    so a good leg can never hide a splayed one. This is the per-leg ``min`` form the
+    plan asks for, mirroring ``thigh_orientation`` (rewards.py); the existing
+    ``shank_orientation`` instead SUMS both legs, letting one vertical shank offset
+    a bad one. A vertical shank under each hip is what makes the final stand stack
+    stably instead of A-framing. Gated to the near-standing HOLD window via
+    ``_post_gate`` (ramp_from=None → standing-band only, so it never fights the
+    legitimately-bent-shank crouch during the rise, unlike the rise-phase
+    ``shank_orientation``).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    knee_ids = _cached_body_ids(env, asset, knee_names, "_shank_worst_knee_ids")
+    foot_ids = _cached_body_ids(env, asset, foot_names, "_shank_worst_foot_ids")
+    vec = (
+        asset.data.body_link_pos_w[:, knee_ids, :]
+        - asset.data.body_link_pos_w[:, foot_ids, :]
+    )  # [B, 2, 3]
+    cos = vec[..., 2] / (torch.norm(vec, dim=-1) + 1e-6)  # [B, 2]
+    worst = cos.min(dim=1).values                          # [B]
+    pen = torch.clamp(min_cos - worst, min=0.0).pow(2)     # [B]
+    return pen * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def post_terminal_core(
+    env: ManagerBasedRlEnv,
+    foot_sensor_name: str,
+    dmin: float = 0.10,
+    dmax: float = 0.30,
+    width_margin: float = 0.10,
+    upright_k: float = 4.0,
+    support_dist_scale: float = 8.0,
+    foot_height_threshold: float = 0.1,
+    height_threshold: float = H_STAGE2,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Task-space terminal-region CORE reward: GEOMETRIC MEAN of 4 factors [B,].
+
+    ``r_core = (r_upright · r_double_support · r_support_margin · r_leg_ordering)^0.25``,
+    each factor in [0, 1], then gated to near-standing by ``_post_gate``. The
+    geometric mean (NOT a weighted sum) means no factor can be farmed while another
+    sits at ~0: a settled terminal stand requires ALL of trunk-vertical, BOTH feet
+    planted, CoM over the support midpoint, and correctly-ordered feet. This is the
+    DeepMimic-style "terminal region in task space" reward — it specifies WHAT a
+    stable stand is, not which joint angles to hit. Factors:
+      - r_upright        = exp(-upright_k·(1 + proj_grav_z)); 1 upright, ~0 flat
+                           (same form as ``body_up_exp``).
+      - r_double_support = mean over feet of (in_contact AND low) ∈ {0, 0.5, 1};
+                           graded so a momentary single-foot lift does not hard-zero
+                           the core (the harder both-feet pressure lives in the
+                           separate ``post_stand_on_feet`` term).
+      - r_support_margin = exp(-support_dist_scale·‖CoM_xy - feet_mid_xy‖²) using the
+                           whole-body CoM (subtree_com) — same signal as
+                           ``com_over_support``.
+      - r_leg_ordering   = f_tol(y_L - y_R, [dmin, dmax], width_margin); the pelvis
+                           yaw-frame signed lateral foot separation (crossed-legs
+                           factor, same as ``leg_width_ordering``).
+    asset_cfg carries the two foot site names; foot_sensor_name is the feet ground
+    contact sensor. Use a POSITIVE weight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+
+    # r_upright: torso vertical (body_up_exp form) — 1 upright, ~0 flat/inverted.
+    pg_z = asset.data.projected_gravity_b[:, 2]
+    r_upright = torch.exp(-upright_k * (1.0 + pg_z))
+
+    # r_double_support: graded both-feet-planted (contact AND low height).
+    contact_sensor: ContactSensor = env.scene[foot_sensor_name]
+    assert contact_sensor.data.found is not None
+    in_contact = contact_sensor.data.found > 0                    # [B, N_feet]
+    foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]      # [B, N_feet]
+    planted = (in_contact & (foot_z < foot_height_threshold)).float()
+    r_double_support = planted.mean(dim=1)                        # [B] in {0, .5, 1}
+
+    # r_support_margin: whole-body CoM over the feet midpoint (com_over_support form).
+    root_id = asset.data.indexing.root_body_id
+    com_xy = asset.data.data.subtree_com[:, root_id, :2]          # [B, 2]
+    feet_mid_xy = asset.data.site_pos_w[:, asset_cfg.site_ids, :2].mean(dim=1)  # [B, 2]
+    dist = torch.norm(com_xy - feet_mid_xy, dim=-1)              # [B]
+    r_support_margin = torch.exp(-support_dist_scale * dist.pow(2))
+
+    # r_leg_ordering: signed pelvis-yaw-frame lateral foot separation (f_tol band).
+    foot_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]      # [B, 2, 3]
+    xy = _pelvis_yaw_frame_xy(asset, foot_w)                      # [B, 2, 2]
+    y_sep = xy[:, 0, 1] - xy[:, 1, 1]                             # y_L - y_R [B]
+    r_leg_ordering = f_tol(y_sep, dmin, dmax, width_margin, 0.1)  # [B]
+
+    core = (
+        r_upright * r_double_support * r_support_margin * r_leg_ordering
+    ).clamp(min=0.0)
+    return core.pow(0.25) * _post_gate(asset, height_threshold)
+
+
+def terminal_gate(
+    env: ManagerBasedRlEnv,
+    foot_sensor_name: str,
+    height_threshold: float = _HOME_HEIGHT,
+    f_min: float = 50.0,
+    s_f: float = 0.15,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Continuous terminal-stability gate g4 in [0, 1] [B,] (diagnostic).
+
+    ``g4 = g_height · g_upright · g_feet``, where ``g_height·g_upright`` is the
+    existing ``_post_gate`` (smooth height ramp × uprightness) and ``g_feet =
+    sigmoid(s_f·(Fz_L - f_min)) · sigmoid(s_f·(Fz_R - f_min))`` uses the per-foot
+    VERTICAL contact force from the ``feet_ground_contact`` netforce sensor (global
+    frame → column 2 is Fz). g4 is ~1 only when the robot is at HOME height, upright,
+    AND actively loading BOTH feet — the task-space definition of a settled quiet
+    stand. Exposed as a metric (``success/terminal_gate``) so the terminal region is
+    visible in TensorBoard; the trained core (``post_terminal_core``) computes its
+    own internal gate rather than depending on this value.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[foot_sensor_name]
+    force = sensor.data.force
+    if force is None:
+        g_feet = torch.zeros(env.num_envs, device=env.device)
+    else:
+        # Vertical contact-force MAGNITUDE per foot. The feet_ground_contact netforce
+        # sensor reports Fz with a negative sign (ground-reaction convention: a loaded
+        # foot reads ~-160 N, i.e. half body weight), so take abs() — we care about how
+        # hard each foot is loaded, not the sign.
+        fz = force[:, 2:3] if force.ndim == 2 else force[..., 2]  # [B,1] or [B,N_feet]
+        g = torch.sigmoid(s_f * (fz.abs() - f_min))               # [B, .]
+        g_feet = g.prod(dim=1)                                    # [B]
+    return _post_gate(asset, height_threshold) * g_feet
 
 
 _SYMMETRY_MIRROR_CACHE_ATTR = "_symmetry_mirror_cache"

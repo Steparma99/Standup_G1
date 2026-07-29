@@ -376,6 +376,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # v25 diagnostic: fraction of steps in a STILL stand (height + low
         # velocity). Compare vs success/candidate — the gap is "stands but wobbles".
         "success/hold_still_fraction": MetricsTermCfg(func=mdp.hold_stillness_fraction),
+        # v26 diagnostic: mean continuous terminal-stability gate g4 (height ×
+        # upright × both-feet-loaded). Fraction of the episode spent in the
+        # task-space "settled quiet stand" region; should rise with post_terminal_core.
+        "success/terminal_gate": MetricsTermCfg(func=mdp.terminal_gate_fraction),
         "success/ever_stood": MetricsTermCfg(func=mdp.ever_stood_fraction),
         "success/fall_after_success": MetricsTermCfg(func=mdp.fall_after_success_active),
         # --- P1.2: Termination reason distribution ---
@@ -1189,6 +1193,48 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # the plateau at v16, and v23's weakened relational version did not help either;
         # asymmetry is emergent, not a code bug — a full audit found no L/R structural
         # asymmetry). post_bilateral_symmetry stays disabled (weight 0) for easy re-add.
+        # ===================================================================
+        # v26 TASK-SPACE TERMINAL "quiet standing" region (DeepMimic-style).
+        # Define WHAT a settled stand is (trunk vertical, both feet loaded, CoM
+        # over support, feet correctly L/R ordered) with generous tolerance and
+        # combine the factors MULTIPLICATIVELY, instead of prescribing an exact
+        # HOME joint pose. Added ALONGSIDE the existing overlapping post_task
+        # terms (post_base_orientation / post_stand_on_feet / com_over_support are
+        # left untouched) for an A/B comparison — prune the redundant ones later.
+        # site_names ("left_foot", "right_foot") + the dmin/dmax band are set
+        # per-robot in config/g1/env_cfgs.py.
+        # ===================================================================
+        # Crossed-legs fix: SIGNED lateral foot separation (y_L - y_R) in the
+        # pelvis yaw-frame, scored against a comfortable band. Deliberately
+        # PROMINENT weight — the user's analysis names this the single most
+        # important reward for crossed legs, and a plain foot-DISTANCE term (which
+        # uses the absolute gap) is structurally blind to which foot is on which
+        # side. NEGATIVE separations (feet crossed) score ~0.
+        "leg_width_ordering": RewardTermCfg(
+            func=mdp.leg_width_ordering, weight=4.0,
+            params={"dmin": 0.10, "dmax": 0.30, "margin": 0.10,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
+        # Geometric-mean CORE: (upright · double_support · support_margin ·
+        # leg_ordering)^(1/4). No factor can be farmed while another is ~0. Modest
+        # weight (3.0, same tier as post_joint_stillness / standing_alive_bonus) —
+        # this is a NEW, unvalidated signal, not started at the post_base_height
+        # tier. Raise once the A/B confirms it moves the final pose the right way.
+        "post_terminal_core": RewardTermCfg(
+            func=mdp.post_terminal_core, weight=3.0,
+            params={"foot_sensor_name": "feet_ground_contact",
+                    "dmin": 0.10, "dmax": 0.30, "width_margin": 0.10,
+                    "upright_k": 4.0, "support_dist_scale": 8.0,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
+        # Worst-leg shank verticality penalty (min over legs, not a sum like the
+        # rise-phase shank_orientation) — a vertical shank under each hip so the
+        # final stand stacks instead of A-framing. NEGATIVE weight; gated to the
+        # standing HOLD window only (never fights the bent-shank crouch).
+        "shank_worst_leg": RewardTermCfg(
+            func=mdp.shank_worst_leg, weight=-3.0,
+            params={"min_cos": 0.9, "asset_cfg": SceneEntityCfg("robot")},
+        ),
     }
 
     ##

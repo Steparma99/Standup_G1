@@ -790,6 +790,13 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
 
+    # v26 task-space terminal region: leg_width_ordering + post_terminal_core both
+    # read the two foot SITES (left, right) — for the pelvis-yaw-frame lateral
+    # ordering and the CoM-over-support / planted-feet checks. Order matters: the
+    # signed separation is y_L - y_R, so site 0 must be the LEFT foot.
+    cfg.rewards["leg_width_ordering"].params["asset_cfg"].site_names = site_names
+    cfg.rewards["post_terminal_core"].params["asset_cfg"].site_names = site_names
+
     # GETUP_ANTI_JUMP_RAMP_FROM: opt-in override, extends anti_jump_velocity's gate
     # below its default floor (_POST_GATE_RAMP_FROM = H_STAGE1 = 0.45m). Below that
     # height — the entire supine-to-crouch phase — there is otherwise ZERO velocity
