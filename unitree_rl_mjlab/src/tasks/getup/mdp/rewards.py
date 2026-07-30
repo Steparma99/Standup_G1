@@ -2209,6 +2209,23 @@ def terminal_gate(
 # (_HOME_HEIGHT, ramp_from=None) so the two PENALTIES never fire during floor
 # push-off, when the hands are legitimately near the body/ground. Symmetry is a
 # DEFERRED later pass (region first) — see joint_symmetry_mirror below.
+#
+# REWARD STATUS LEDGER (disabled/removed arm-posture terms — read before ablating,
+# so a removal's ORIGINAL purpose isn't silently lost, as happened with the
+# shoulder-roll regression below):
+#   - arms_in_front            weight 0  — SUPERSEDED by arm_hand_box (its forward-X
+#                                          band is now that box's X axis).
+#   - post_upper_body_posture  weight 0  — joint-space exp posture pull; superseded by
+#                                          the task-space arm terms here.
+#   - post_home_pose_l2 /
+#     post_standing_posture /
+#     post_bilateral_symmetry  weight 0  — joint-space HOME imitation; deferred, the
+#                                          task-space region replaced them.
+#   - style_shoulder_roll_deviation  REMOVED v9 ablation (getup_env_cfg.py:727). It
+#     guarded against the shoulder rolling INWARD (arm against torso). Its removal
+#     wasn't revisited in the v27/v28 arm rework and the exact defect (left arm back &
+#     touching torso) came back. v29 folds a smooth OUTWARD-roll band into
+#     arm_elbow_flexion (sr_lo/sr_hi) to cover it without a new term.
 # ---------------------------------------------------------------------------
 
 _ARM_TORSO_ID_CACHE = "_arm_torso_id"
@@ -2288,21 +2305,68 @@ def arm_elbow_flexion(
     margin: float = 0.15,
     value_at_margin: float = 0.1,
     elbow_joints: tuple[str, ...] = ("left_elbow_joint", "right_elbow_joint"),
+    # v29: shoulder pitch + OUTWARD-roll bands folded into this same term (no new
+    # Episode_Reward entry). Bands centered on HOME (shoulder_pitch 0.20,
+    # shoulder_roll ±0.20 → outward +0.20). Set sp_hi/sr_hi both finite; a None
+    # for either band-pair disables that factor (backwards-compatible).
+    sp_lo: float | None = 0.00,
+    sp_hi: float | None = 0.45,
+    sr_lo: float | None = 0.05,
+    sr_hi: float | None = 0.60,
+    shoulder_pitch_joints: tuple[str, ...] = (
+        "left_shoulder_pitch_joint", "right_shoulder_pitch_joint",
+    ),
+    shoulder_roll_joints: tuple[str, ...] = (
+        "left_shoulder_roll_joint", "right_shoulder_roll_joint",
+    ),
     height_threshold: float = _HOME_HEIGHT,
     ramp_from: float | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward both elbows sitting in a comfortable FLEXION band [B,].
+    """Reward the whole arm resting in a natural stand pose: elbow + shoulder [B,].
 
-    ``f_tol(q_elbow, [e_lo, e_hi])`` averaged over the two elbows × gate. Rejects a
-    fully-straight (locked, q≈0) arm and a hyper-flexed one; centered on HOME 0.60.
-    Replaces prescribing 'arms outstretched' — a bent elbow is what a natural relaxed
-    stand shows. Both elbows share sign, so one band serves both.
+    Geometric mean of three banded factors (product^(1/3) × gate), each a mean over
+    the two arms so both sides are constrained:
+      - ELBOW flexion  ``f_tol(q_elbow, [e_lo, e_hi])``: rejects a locked-straight
+        (q≈0) or hyper-flexed arm; centered on HOME 0.60.
+      - SHOULDER pitch ``f_tol(q_sh_pitch, [sp_lo, sp_hi])``: keeps the upper arm from
+        sweeping far forward/back of HOME 0.20 — the "arm behind the trunk" defect.
+        Banded symmetrically-ish around HOME so it corrects either sign without
+        assuming the pitch sign convention.
+      - SHOULDER roll (OUTWARD) ``f_tol(q_roll·sign, [sr_lo, sr_hi])`` with
+        sign=[+1 left, −1 right] so outward is +0.20 at HOME for BOTH arms: an inward
+        roll (arm rolled against the torso — the "touching the robot" defect) has
+        outward < sr_lo → ~0. This is the smooth reincarnation of the v9-ablated
+        ``style_shoulder_roll_deviation`` binary penalty (same failure it guarded).
+    Elbow+shoulder together pin the redundant arm DOF that the palm-box + elbow-only
+    terms leave free (a policy can satisfy palm position and elbow angle while still
+    rolling the shoulder inward / sweeping the upper arm back). Same weight slot as
+    the old elbow-only term — no reward-group change. asset_cfg carries the robot.
     """
     asset: Entity = env.scene[asset_cfg.name]
     ids = _cached_joint_ids(env, asset, elbow_joints, _ARM_ELBOW_JOINT_IDS)
-    q = asset.data.joint_pos[:, ids]                              # [B, 2]
-    r = f_tol(q, e_lo, e_hi, margin, value_at_margin).mean(dim=1)  # [B]
+    q = asset.data.joint_pos[:, ids]                                  # [B, 2]
+    factors = [f_tol(q, e_lo, e_hi, margin, value_at_margin).mean(dim=1)]  # elbow
+
+    if sp_hi is not None and sp_lo is not None:
+        sp_ids = _cached_joint_ids(
+            env, asset, shoulder_pitch_joints, "_arm_sh_pitch_ids"
+        )
+        q_sp = asset.data.joint_pos[:, sp_ids]                       # [B, 2]
+        factors.append(f_tol(q_sp, sp_lo, sp_hi, margin, value_at_margin).mean(dim=1))
+
+    if sr_hi is not None and sr_lo is not None:
+        sr_ids = _cached_joint_ids(
+            env, asset, shoulder_roll_joints, "_arm_sh_roll_ids"
+        )
+        q_sr = asset.data.joint_pos[:, sr_ids]                       # [B, 2] (L, R)
+        # OUTWARD roll: +q for the left shoulder, −q for the right, so HOME (+0.20 /
+        # −0.20) maps to +0.20 outward for BOTH and an inward roll is negative.
+        sign = torch.tensor([1.0, -1.0], device=env.device).view(1, -1)
+        q_out = q_sr * sign                                          # [B, 2]
+        factors.append(f_tol(q_out, sr_lo, sr_hi, margin, value_at_margin).mean(dim=1))
+
+    r = torch.stack(factors, dim=1).clamp(min=0.0).prod(dim=1).pow(1.0 / len(factors))
     return r * _post_gate(asset, height_threshold, ramp_from=ramp_from)
 
 

@@ -1255,11 +1255,17 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                     "z_lo": -0.30, "z_hi": 0.00, "margin": 0.10,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
-        # ELBOW flexion band (centered on HOME 0.60) — rejects locked-straight and
-        # hyper-flexed arms. Secondary tier weight.
+        # ARM rest-pose band: ELBOW flexion (HOME 0.60) + v29 SHOULDER pitch (HOME
+        # 0.20) + SHOULDER outward-roll (HOME ±0.20). Geometric mean of the three,
+        # folded into ONE term (no new Episode_Reward entry). The shoulder factors
+        # pin the redundant DOF that let the arm sweep back / roll against the torso
+        # (the persistent left-arm-back-and-touching defect); roll factor is the
+        # smooth reincarnation of the v9-ablated style_shoulder_roll_deviation.
         "arm_elbow_flexion": RewardTermCfg(
             func=mdp.arm_elbow_flexion, weight=2.0,
             params={"e_lo": 0.35, "e_hi": 0.95, "margin": 0.15,
+                    "sp_lo": 0.00, "sp_hi": 0.45,   # shoulder pitch band (HOME 0.20)
+                    "sr_lo": 0.05, "sr_hi": 0.60,   # shoulder OUTWARD-roll band (HOME 0.20)
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
         # OVEREXTENSION penalty: squared hinge on shoulder→palm distance past l_max
@@ -1272,9 +1278,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # CLEARANCE penalty: torso-frame radial proxy, predictive anti-self-collision
         # (palm pinned to chest/back). NEGATIVE weight; final-hold gated so it never
         # fights the push-off phase where hands are legitimately near the body.
+        # v29: d_safe 0.15 → 0.22 (closer to HOME radial ≈0.276 so the margin
+        # actually engages before contact — at 0.15 it stayed pinned at ~0 all of
+        # v28, teaching nothing) and weight -3 → -5 to give it real gradient.
         "arm_clearance": RewardTermCfg(
-            func=mdp.arm_clearance, weight=-3.0,
-            params={"d_safe": 0.15,
+            func=mdp.arm_clearance, weight=-5.0,
+            params={"d_safe": 0.22,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
     }

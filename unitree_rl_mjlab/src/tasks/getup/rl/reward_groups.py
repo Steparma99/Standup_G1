@@ -21,8 +21,13 @@ GROUP_ORDER: tuple[str, ...] = ("task", "style", "regularization", "post_task")
 # Style raised 1.9 -> 2.2: posture shaping is important for a correct standup, and the
 # style terms are height-gated (only fire once the robot rises), so a higher critic
 # weight amplifies them where they matter without touching floor-phase task learning.
+# v29: post_task 1.0 -> 1.5. post_task now carries the most individual terms (all the
+# terminal arm/leg pose shaping) and the largest total weight budget, yet had the
+# LOWEST critic weight — the newest terminal terms (arm_hand_box, leg_width_ordering,
+# post_terminal_core) were still climbing, un-plateaued, at the end of the v28 run.
+# Raising the group's critic weight amplifies exactly those terminal-pose gradients.
 # Overridable from the algorithm config (``reward_group_weights``).
-GROUP_WEIGHTS: tuple[float, ...] = (2.5, 2.2, 0.1, 1.0)
+GROUP_WEIGHTS: tuple[float, ...] = (2.5, 2.2, 0.1, 1.5)
 
 # Provisional assignment of every reward term to a group. Must cover ALL active reward
 # terms exactly once (enforced by build_group_onehot). Terminal penalties
