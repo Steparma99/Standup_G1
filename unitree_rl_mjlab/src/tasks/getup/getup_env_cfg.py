@@ -1138,9 +1138,17 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # gradient pulling the CoM/arms forward over the feet; at 8 a 20 cm backward CoM
         # offset costs ~27% vs ~18% at 5, so arms-back is disciplined harder).
         # site_names + feets sensor set per-robot in env_cfgs.py.
+        # v30: margin-based static + capture-point balance over the double-foot
+        # support polygon (replaces the old feet-midpoint Gaussian). Rewards a signed
+        # MARGIN into the support box (not merely "CoM inside"), blends in a
+        # capture-point margin near the settled stand, and requires a hysteretic
+        # double-support contact. site_names (left_foot,right_foot) set in env_cfgs.py.
         "com_over_support": RewardTermCfg(
             func=mdp.com_over_support, weight=5.0,
-            params={"foot_sensor_name": "feet_ground_contact", "dist_scale": 8.0,
+            params={"foot_sensor_name": "feet_ground_contact",
+                    "m_safe_com": 0.03, "sigma_com": 0.05,
+                    "m_safe_cp": 0.02, "sigma_cp": 0.05,
+                    "f_on": 60.0, "f_off": 30.0,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
         # Explicit bonus for holding the stand (not just touching it for a frame).

@@ -754,6 +754,11 @@ def get_episode_state(env: "ManagerBasedRlEnv", asset: "Entity") -> dict:
         "best_height": asset.data.root_link_pos_w[:, 2].clone(),
         # Consecutive steps since the last new height record (no-progress stall timeout).
         "stall_counter": torch.zeros(n, device=device, dtype=torch.long),
+        # Per-foot contact LATCH with hysteresis (com_over_support double-support gate):
+        # [B, 2] (left, right). Turns True when Fz > f_on, False when Fz < f_off, holds
+        # otherwise — debounces chattering ground contact so the double-support balance
+        # reward does not flicker. Cleared on reset.
+        "foot_contact_latch": torch.zeros(n, 2, device=device, dtype=torch.bool),
     }
     setattr(env, _EPISODE_STATE_ATTR, state)
     return state
@@ -785,3 +790,5 @@ def reset_episode_state(
     state["fall_counter"][env_ids] = 0
     state["best_height"][env_ids] = asset.data.root_link_pos_w[env_ids, 2]
     state["stall_counter"][env_ids] = 0
+    if "foot_contact_latch" in state:
+        state["foot_contact_latch"][env_ids] = False

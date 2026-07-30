@@ -627,74 +627,144 @@ def supine_rising_prep(
     return supine_gate * low_gate * 0.5 * (sit_up + com_term)
 
 
+def _box_signed_margin(
+    p_xy: torch.Tensor, x_min: torch.Tensor, x_max: torch.Tensor,
+    y_min: torch.Tensor, y_max: torch.Tensor,
+) -> torch.Tensor:
+    """Signed distance of point(s) ``p_xy`` [B,2] to an axis-aligned box [B,].
+
+    m = min(x_max-px, px-x_min, y_max-py, py-y_min): the ``a_k·x <= b_k`` half-plane
+    margin form. m > 0 inside (distance to nearest wall), m = 0 on the boundary,
+    m < 0 outside (sign correct; magnitude is the conservative per-axis overshoot).
+    Exact for the 4-edge polygon we approximate the double-foot support region with.
+    """
+    px, py = p_xy[..., 0], p_xy[..., 1]
+    d = torch.stack([x_max - px, px - x_min, y_max - py, py - y_min], dim=-1)  # [B,4]
+    return d.min(dim=-1).values                                               # [B]
+
+
 def com_over_support(
     env: ManagerBasedRlEnv,
     foot_sensor_name: str,
+    # --- support-polygon geometry (foot footprint half-extents, metres, from the
+    #     g1.xml sole capsules relative to the foot SITE at ankle x=0.04) ----------
+    foot_fwd: float = 0.092,
+    foot_back: float = 0.094,
+    foot_half_width: float = 0.026,
+    # --- static CoM margin reward -------------------------------------------------
+    m_safe_com: float = 0.03,
+    sigma_com: float = 0.05,
+    # --- capture-point (dynamic) margin reward, blended in only in the final stage
+    m_safe_cp: float = 0.02,
+    sigma_cp: float = 0.05,
+    gravity: float = 9.81,
+    min_com_height: float = 0.35,
+    g4_h_lo: float = 0.60,
+    g4_h_hi: float = 0.70,
+    # --- double-support contact hysteresis (per foot, Newtons) --------------------
+    f_on: float = 60.0,
+    f_off: float = 30.0,
+    # --- overall activation gates (rising → standing) -----------------------------
     min_height: float = 0.25,
     height_band: float = 0.15,
-    dist_scale: float = 5.0,
     upright_lo: float = 0.3,
     upright_hi: float = 0.7,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward the whole-body CoM projecting over the feet support area [B,].
+    """Margin-based static + dynamic (capture-point) balance over the support polygon [B,].
 
-    Stage-gated: only active when the robot is rising (Stage 1-3). Zero when
-    the robot is flat on the ground so it cannot interfere with Stage-0 righting.
+    Upgrades the old feet-midpoint Gaussian: "CoM inside the polygon" is not enough —
+    a CoM at the polygon CENTRE and one a few mm from an edge both satisfy it but have
+    very different robustness. Here we reward a signed MARGIN into the support polygon,
+    plus a capture-point margin so a stationary stand scores above one drifting toward
+    an edge (the arm-back counterweight symptom).
 
-    Signal: Gaussian reward centred on zero offset between CoM XY and the
-    midpoint of the two foot sites.  reward = exp(-dist_scale * dist²).
+    Pipeline (all in the pelvis YAW frame via ``_pelvis_yaw_frame_xy`` — clean
+    fore-aft/lateral axes, roll/pitch-invariant):
+      - SUPPORT POLYGON: axis-aligned box = AABB of the two foot footprints. Built from
+        the two foot sites expanded by (foot_fwd, foot_back, foot_half_width). A box is
+        the 4-edge ``a_k·x <= b_k`` polygon the spec's margin formula wants.
+      - STATIC margin  m_COM = signed dist of the whole-body CoM (subtree_com) to the
+        box; r_COM = exp(-ReLU(m_safe_com - m_COM)² / sigma_com²) — rewards being at
+        least m_safe_com INSIDE, not merely inside.
+      - CAPTURE POINT  ξ = CoM_xy + v_CoM_xy·sqrt(h_CoM/g) (subtree_linvel); m_CP its
+        margin; r_CP likewise. The inverted-pendulum assumption only holds near a
+        settled stand, so r_CP is blended in by g4 (height·upright·double-support):
+        r_CP_eff = 1 - g4·(1 - r_CP) → neutral (1) during the rise, full r_CP at HOME.
+      - r_balance = sqrt(r_COM · r_CP_eff) (geometric mean: a good CoM can't hide a
+        capture point drifting out of support).
+      - DOUBLE SUPPORT: per-foot Fz (netforce sensor) with hysteresis latch
+        (f_on/f_off, in episode state); the polygon is undefined without BOTH feet, so
+        the whole reward is gated by c_L·c_R (replaces the old any-foot gate).
 
-    Three multiplicative gates (all in [0, 1]):
-      1. Height gate   — smooth ramp from min_height to min_height + height_band.
-                         Zero when pelvis is flat on the floor, full at ~Stage 2.
-      2. Upright gate  — smooth ramp as the torso rotates toward vertical.
-                         Uses -proj_grav_z: 0 when flat, 1 when upright.
-                         Activates between -proj_grav_z in [upright_lo, upright_hi].
-      3. Foot contact  — hard gate: any foot must touch the terrain.
-                         Without ground contact the support polygon is undefined.
-
-    asset_cfg must have site_names = (left_foot, right_foot) set per-robot.
-    foot_sensor_name must be a ContactSensor with found field, e.g. feet_ground_contact.
+    Overall activation = height_gate · upright_gate (rising→standing) · double_support,
+    so it never fires supine and demands a loaded double stance for any balance credit.
+    asset_cfg.site_names = (left_foot, right_foot); foot_sensor_name a 2-foot netforce
+    ContactSensor (feet_ground_contact). Bounded in [0,1] (weight unchanged).
     """
     asset: Entity = env.scene[asset_cfg.name]
-
-    # --- Whole-body CoM XY (mujoco_warp subtree_com of root body) ----------
-    # subtree_com[:, root_body_id] = CoM of the whole robot subtree. Offset
-    # from the pelvis by ~9cm (G1 CoM is anterior to and slightly below pelvis).
     root_id = asset.data.indexing.root_body_id
-    com_xy = asset.data.data.subtree_com[:, root_id, :2]  # [B, 2]
 
-    # --- Feet midpoint XY ---------------------------------------------------
-    foot_pos_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :2]  # [B, 2, 2]
-    feet_mid_xy = foot_pos_w.mean(dim=1)  # [B, 2]
+    # --- CoM position + velocity, capture point (world) ---------------------
+    com_w = asset.data.data.subtree_com[:, root_id, :]        # [B, 3]
+    v_com_w = asset.data.data.subtree_linvel[:, root_id, :]   # [B, 3]
+    h_com = com_w[:, 2].clamp(min=min_com_height)             # [B]
+    omega0 = torch.sqrt(gravity / h_com)                     # [B]
+    xi_xy = com_w[:, :2] + v_com_w[:, :2] / omega0.unsqueeze(1)  # [B, 2]
+    xi_w = torch.cat([xi_xy, com_w[:, 2:3]], dim=1)          # [B, 3] (z arbitrary)
 
-    # --- Gaussian reward on CoM-to-midpoint distance ------------------------
-    dist = torch.norm(com_xy - feet_mid_xy, dim=-1)          # [B], metres
-    base_reward = torch.exp(-dist_scale * dist.pow(2))        # [B], in (0, 1]
+    # --- Project feet, CoM, capture point into the pelvis yaw frame together -
+    foot_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]  # [B, 2, 3] (L, R)
+    stacked = torch.cat(
+        [foot_w, com_w.unsqueeze(1), xi_w.unsqueeze(1)], dim=1
+    )                                                        # [B, 4, 3]
+    proj = _pelvis_yaw_frame_xy(asset, stacked)              # [B, 4, 2]
+    feet_p = proj[:, :2, :]                                  # [B, 2, 2]
+    com_p = proj[:, 2, :]                                    # [B, 2]
+    xi_p = proj[:, 3, :]                                     # [B, 2]
 
-    # --- Gate 1: height ------------------------------------------------------
+    # --- Support box (AABB of the two footprints) in the yaw frame ----------
+    fx, fy = feet_p[..., 0], feet_p[..., 1]                  # [B, 2] each
+    x_min = fx.min(dim=1).values - foot_back
+    x_max = fx.max(dim=1).values + foot_fwd
+    y_min = fy.min(dim=1).values - foot_half_width
+    y_max = fy.max(dim=1).values + foot_half_width
+
+    m_com = _box_signed_margin(com_p, x_min, x_max, y_min, y_max)  # [B]
+    m_cp = _box_signed_margin(xi_p, x_min, x_max, y_min, y_max)    # [B]
+    r_com = torch.exp(-torch.clamp(m_safe_com - m_com, min=0.0).pow(2) / (sigma_com ** 2))
+    r_cp = torch.exp(-torch.clamp(m_safe_cp - m_cp, min=0.0).pow(2) / (sigma_cp ** 2))
+
+    # --- Double-support contact latch with hysteresis (per foot) ------------
     h = asset.data.root_link_pos_w[:, 2]
-    height_gate = torch.clamp((h - min_height) / height_band, 0.0, 1.0)
-
-    # --- Gate 2: uprightness ------------------------------------------------
-    # proj_grav_z = -1 → upright; 0 → flat.  We use -proj_grav_z ∈ [0, 1].
-    pg_z = asset.data.projected_gravity_b[:, 2]      # [B]
-    uprightness = -pg_z                               # [B]; 1=upright, 0=flat
-    upright_gate = torch.clamp(
-        (uprightness - upright_lo) / max(upright_hi - upright_lo, 1e-6),
-        0.0, 1.0,
-    )
-
-    # --- Gate 3: any foot contact -------------------------------------------
-    foot_sensor = env.scene[foot_sensor_name]
-    found = foot_sensor.data.found
-    if found is not None:
-        any_foot = (found > 0).any(dim=1).float()   # [B]
+    uprightness = torch.clamp(-asset.data.projected_gravity_b[:, 2], 0.0, 1.0)  # [B]
+    sensor = env.scene[foot_sensor_name]
+    force = sensor.data.force
+    state = get_episode_state(env, asset)
+    prev = state["foot_contact_latch"]                       # [B, 2] bool
+    if force is not None:
+        fz = force[..., 2].abs()                             # [B, 2]
+        turn_on = fz > f_on
+        turn_off = fz < f_off
+        latch = torch.where(turn_on, torch.ones_like(prev),
+                            torch.where(turn_off, torch.zeros_like(prev), prev))
+        state["foot_contact_latch"] = latch
+        double_support = (latch[:, 0] & latch[:, 1]).float()  # [B]
     else:
-        any_foot = torch.ones(env.num_envs, device=env.device)
+        double_support = torch.zeros(env.num_envs, device=env.device)
 
-    return base_reward * height_gate * upright_gate * any_foot
+    # --- g4: capture-point only meaningful near a settled double-support stand
+    g4_height = torch.clamp((h - g4_h_lo) / max(g4_h_hi - g4_h_lo, 1e-6), 0.0, 1.0)
+    g4 = g4_height * uprightness * double_support             # [B]
+    r_cp_eff = 1.0 - g4 * (1.0 - r_cp)                        # neutral until final stage
+    r_balance = torch.sqrt(r_com * r_cp_eff)                  # [B]
+
+    # --- Overall activation gates -------------------------------------------
+    height_gate = torch.clamp((h - min_height) / height_band, 0.0, 1.0)
+    upright_gate = torch.clamp(
+        (uprightness - upright_lo) / max(upright_hi - upright_lo, 1e-6), 0.0, 1.0,
+    )
+    return r_balance * height_gate * upright_gate * double_support
 
 
 def action_saturation(
