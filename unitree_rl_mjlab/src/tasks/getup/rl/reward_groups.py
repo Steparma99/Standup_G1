@@ -96,6 +96,12 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "arm_elbow_flexion": "post_task",
     "arm_overextension": "post_task",
     "arm_clearance": "post_task",
+    # v31 banded joint-space final-pose groups (legs / waist / upper). upper folds in
+    # the hand-workspace box (sqrt(r_arms·r_hand)). Replace the disabled joint-space
+    # imitation terms + the weak task-space arm bands.
+    "pose_legs": "post_task",
+    "pose_waist": "post_task",
+    "pose_upper": "post_task",
 }
 
 

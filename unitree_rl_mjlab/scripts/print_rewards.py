@@ -54,6 +54,10 @@ HEALTH_TAGS = [
     # v26 terminal-region gate diagnostic (geometric mean of upright x
     # double-support x feet-ground-force gate).
     "Episode_Metrics/success/terminal_gate",
+    # v31: pose_upper split — watch which HALF is stuck. If upper_arms << upper_hand,
+    # the hands are placed but the shoulders/elbows are still wrong (contorted arm).
+    "Episode_Metrics/pose/upper_arms",
+    "Episode_Metrics/pose/upper_hand",
     "Episode_Metrics/curriculum/assistance_force",
     "Episode_Metrics/curriculum/beta_rescaler",
     # v25: the circuit-breaker internals — beta_paused ~1.0 with beta_success_ema

@@ -107,10 +107,33 @@ MUJOCO_GL=egl conda run -n unitree_rl_cuda python scripts/play.py Unitree-G1-Get
 
 **Visualize Rewards on the server**: 
 
-conda run -n unitree_rl_cuda python scripts/print_rewards.py 2026-07-16_16-17-51_v9_beta_prone
+conda run -n unitree_rl_cuda python scripts/print_rewards.py 2026-07-30_15-46-24_v30_support_polygon
 
 
 cd ~/Standup/Standup_G1/unitree_rl_mjlab/logs/rsl_rl/g1_getup
 RUN="2026-06-24_09-34-38_Phase_3_no_jump/"
 
 
+RUN=2026-07-16_16-17-51_v9_beta_prone        # e.g. 2026-07-16_..._v9_beta_prone_pass3
+ITER=model_4500.pt    # e.g. 1000 (must match an existing model_<N>.pt)
+
+FORCE=$(conda run -n unitree_rl_cuda python scripts/assist_force_at.py "$RUN" "$ITER")
+BETA=$(conda run -n unitree_rl_cuda python scripts/assist_force_at.py "$RUN" "$ITER" \
+  --tag Episode_Metrics/curriculum/beta_rescaler)
+echo "force=$FORCE  beta=$BETA"
+
+GETUP_EVAL_ASSIST_FORCE="$FORCE" MUJOCO_GL=egl conda run -n unitree_rl_cuda --no-capture-output \
+  python scripts/play.py Unitree-G1-GetUp \
+    --checkpoint-file "logs/rsl_rl/g1_getup/$RUN/model_${ITER}.pt" \
+    --eval-beta "$BETA" \
+    --num-envs 16 --max-extra-envs 8 \
+    --cam-distance 6 --cam-elevation -15 \
+    --video=True --video-length 500 --video-width 1920 --video-height 1080
+
+mv logs/rsl_rl/g1_getup/$RUN/videos/play/rl-video-step-0.mp4 \
+   logs/rsl_rl/g1_getup/$RUN/videos/play/model_${ITER}_force${FORCE}N_beta${BETA}.mp4
+
+
+
+cd ~/Standup/Standup_G1/unitree_rl_mjlab
+nohup bash scripts/auto_video.sh 2026-07-17_10-21-22_v11_beta_cooldown --interval 500 --once > /dev/null 2>&1

@@ -2353,8 +2353,22 @@ def arm_hand_box(
     palm sites in ORDER (left, right).
     """
     asset: Entity = env.scene[asset_cfg.name]
-    off_b = _palm_offset_torso_frame(env, asset, torso_body, asset_cfg.site_ids)  # [B,P,3]
-    assert off_b.shape[1] == 2, "arm_hand_box expects exactly 2 palm sites (L, R)"
+    worst = _hand_box_worst(
+        env, asset, asset_cfg.site_ids, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi,
+        margin, value_at_margin, torso_body,
+    )
+    return worst * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def _hand_box_worst(
+    env: ManagerBasedRlEnv, asset: Entity, site_ids: torch.Tensor,
+    x_lo: float, x_hi: float, y_lo: float, y_hi: float, z_lo: float, z_hi: float,
+    margin: float, value_at_margin: float, torso_body: str,
+) -> torch.Tensor:
+    """Worst-hand 3D torso-box tolerance in [0,1] (no gate). Core of arm_hand_box;
+    reused as ``r_hand_workspace`` inside ``pose_upper``."""
+    off_b = _palm_offset_torso_frame(env, asset, torso_body, site_ids)  # [B,P,3]
+    assert off_b.shape[1] == 2, "hand box expects exactly 2 palm sites (L, R)"
     x = off_b[..., 0]                                              # [B, 2]
     z = off_b[..., 2]                                              # [B, 2]
     # OUTWARD lateral: +y for the left palm (site 0), −y for the right (site 1).
@@ -2364,8 +2378,135 @@ def arm_hand_box(
     r_y = f_tol(y_out, y_lo, y_hi, margin, value_at_margin)
     r_z = f_tol(z, z_lo, z_hi, margin, value_at_margin)
     r_hand = (r_x * r_y * r_z).clamp(min=0.0).pow(1.0 / 3.0)       # [B, 2]
-    worst = r_hand.min(dim=1).values                              # [B]
-    return worst * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+    return r_hand.min(dim=1).values                               # [B]
+
+
+# ---------------------------------------------------------------------------
+# v31: BANDED joint-space final-pose reward, split into LEGS / WAIST / UPPER groups.
+# Each group scores exp(-k · L) where L = [Σ w_j·ReLU(|q_j−q*_j|−δ_j)² / s²] / Σ w_j
+# (the user's tolerance-band pose loss): a per-joint DEAD-ZONE (δ_j) so small balance
+# corrections (esp. ankles) are free, quadratic only OUTSIDE the band, weighted-mean
+# normalized per group, then exp-shaped. Targets = HOME_KEYFRAME. Grouped so the
+# lower body / torso / arms can be weighted and diagnosed independently. UPPER also
+# folds in the hand-workspace (r_upper = sqrt(r_arms · r_hand_box)) so correct arm
+# ANGLES and correct hand POSITION are both required — neither can be gamed alone.
+# Geometric constraints (leg_width_ordering, arm_clearance) stay SEPARATE terms.
+# Replaces the disabled joint-space imitation terms (post_standing_posture etc.) and
+# the weak task-space arm bands (arm_elbow_flexion) — see REWARD STATUS LEDGER above.
+# ---------------------------------------------------------------------------
+
+_POSE_LEGS_CACHE = "_pose_legs_cache"
+_POSE_WAIST_CACHE = "_pose_waist_cache"
+_POSE_UPPER_CACHE = "_pose_upper_cache"
+
+
+def _resolve_pose_cache(
+    env: ManagerBasedRlEnv, asset: Entity, attr: str,
+    target: dict[str, float], weights: dict[str, float], bands: dict[str, float] | None,
+) -> dict:
+    """Resolve+cache per-joint target / weight / band vectors from {regex: value} dicts."""
+    cache = getattr(env, attr, None)
+    if cache is None:
+        names = asset.joint_names
+        cache = {
+            "tgt": torch.tensor([resolve_expr(target or {}, names, 0.0)], device=env.device),
+            "w": torch.tensor([resolve_expr(weights or {}, names, 0.0)], device=env.device),
+            "band": torch.tensor([resolve_expr(bands or {}, names, 0.0)], device=env.device),
+        }
+        setattr(env, attr, cache)
+    return cache
+
+
+def _grouped_pose_value(asset: Entity, cache: dict, scale: float, k: float) -> torch.Tensor:
+    """exp(-k · L), L = weighted-mean banded squared error / scale²  → [B] in (0,1]."""
+    err = asset.data.joint_pos - cache["tgt"]              # [B, J]
+    e2 = _banded_sq_err(err, cache["band"])               # [B, J]  ReLU(|err|-band)²
+    wsum = cache["w"].sum().clamp(min=1e-6)
+    L = (cache["w"] * e2).sum(dim=1) / (wsum * (scale ** 2))  # [B]
+    return torch.exp(-k * L)
+
+
+def pose_legs(
+    env: ManagerBasedRlEnv,
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
+    scale: float = 0.5,
+    k: float = 3.0,
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """LOWER-BODY banded pose reward toward HOME [B,] (hip/knee/ankle). High weights on
+    hip_roll/hip_yaw/knee (leg-crossing / stance width / symmetry), moderate hip_pitch,
+    wide bands on ankles (primary balance actuators). Complements — does not replace —
+    leg_width_ordering (the explicit y_L>y_R geometric constraint)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = _resolve_pose_cache(env, asset, _POSE_LEGS_CACHE, target_joint_pos, joint_weights, joint_bands)
+    return _grouped_pose_value(asset, cache, scale, k) * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def pose_waist(
+    env: ManagerBasedRlEnv,
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
+    scale: float = 0.5,
+    k: float = 3.0,
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """WAIST banded pose reward toward HOME [B,] (yaw/roll/pitch). Narrow bands on
+    waist roll/pitch (torso alignment), wider on waist yaw. Measures internal joint
+    config — complements the task-space torso-ORIENTATION reward (different quantity)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = _resolve_pose_cache(env, asset, _POSE_WAIST_CACHE, target_joint_pos, joint_weights, joint_bands)
+    return _grouped_pose_value(asset, cache, scale, k) * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def pose_upper(
+    env: ManagerBasedRlEnv,
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
+    scale: float = 0.5,
+    k: float = 3.0,
+    # hand-workspace box (torso frame), same calibration as arm_hand_box:
+    x_lo: float = 0.12, x_hi: float = 0.30, y_lo: float = 0.12, y_hi: float = 0.32,
+    z_lo: float = -0.30, z_hi: float = 0.00, margin: float = 0.10,
+    value_at_margin: float = 0.1, torso_body: str = "torso_link",
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """UPPER-BODY pose reward: r_upper = sqrt(r_arms · r_hand_workspace) × gate [B,].
+
+    r_arms = banded joint pose over shoulder(pitch/roll/yaw)/elbow/wrist (high weight
+    on shoulders+elbow, wide bands on wrists). r_hand_workspace = worst-hand 3D
+    torso-box placement (reused arm_hand_box core). The geometric mean REQUIRES both:
+    correct arm ANGLES and correct hand POSITION — so the palm-box can no longer be
+    satisfied by a contorted shoulder (the v27-v30 failure), and correct angles can't
+    hide a wrong hand position. Clearance stays a SEPARATE term (arm_clearance).
+    asset_cfg.site_names = (left_palm, right_palm)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = _resolve_pose_cache(env, asset, _POSE_UPPER_CACHE, target_joint_pos, joint_weights, joint_bands)
+    r_arms = _grouped_pose_value(asset, cache, scale, k)          # [B]
+    r_hand = _hand_box_worst(
+        env, asset, asset_cfg.site_ids, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi,
+        margin, value_at_margin, torso_body,
+    )                                                            # [B]
+    gate = _post_gate(asset, height_threshold, ramp_from=ramp_from)
+    # DIAGNOSTIC STASH: expose the two halves (gated) so metrics can log which half
+    # is failing without a weight-0 reward term (the reward manager SKIPS weight-0
+    # terms, so they can't carry diagnostics — see metrics.pose_upper_{arms,hand}).
+    # Metrics run right after rewards in the same step, so this is always fresh.
+    env._pose_upper_diag = {  # type: ignore[attr-defined]
+        "arms": (r_arms * gate).detach(),
+        "hand": (r_hand * gate).detach(),
+    }
+    r_upper = torch.sqrt((r_arms * r_hand).clamp(min=0.0))       # [B]
+    return r_upper * gate
 
 
 def arm_elbow_flexion(

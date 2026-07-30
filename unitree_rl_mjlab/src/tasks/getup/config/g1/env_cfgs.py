@@ -799,6 +799,54 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.rewards["arm_clearance"].params["asset_cfg"].site_names = _palm_sites
     # v24: joint_symmetry_mirror REMOVED (no symmetry reward — see getup_env_cfg.py).
 
+    # ===================================================================
+    # v31: BANDED joint-space FINAL-POSE groups (pose_legs / pose_waist / pose_upper).
+    # target = HOME_KEYFRAME (same pose the whole reward chain anchors on). Per-joint
+    # weights + dead-zone bands (radians) per the group design: legs weight hip-roll/
+    # yaw/knee (leg-crossing / stance / symmetry), moderate hip-pitch, WIDE ankle bands
+    # (balance actuators); waist narrow roll/pitch, wider yaw; arms weight shoulders+
+    # elbow, WIDE wrist bands. pose_upper also reads the palm sites (hand-workspace).
+    # These REPLACE the disabled joint-space imitation terms and the weak task-space
+    # arm bands (arm_hand_box/arm_elbow_flexion/arm_overextension now weight 0).
+    # ===================================================================
+    _home = dict(HOME_KEYFRAME.joint_pos)
+    # -- LEGS --
+    cfg.rewards["pose_legs"].params["target_joint_pos"] = _home
+    cfg.rewards["pose_legs"].params["joint_weights"] = {
+        ".*_hip_roll_joint": 3.0, ".*_hip_yaw_joint": 3.0, ".*_knee_joint": 3.0,
+        ".*_hip_pitch_joint": 1.5, ".*_ankle_pitch_joint": 1.0, ".*_ankle_roll_joint": 1.0,
+    }
+    cfg.rewards["pose_legs"].params["joint_bands"] = {
+        ".*_hip_roll_joint": 0.08, ".*_hip_yaw_joint": 0.08, ".*_knee_joint": 0.10,
+        ".*_hip_pitch_joint": 0.12, ".*_ankle_pitch_joint": 0.15, ".*_ankle_roll_joint": 0.15,
+    }
+    # -- WAIST --
+    cfg.rewards["pose_waist"].params["target_joint_pos"] = _home
+    cfg.rewards["pose_waist"].params["joint_weights"] = {
+        "waist_roll_joint": 3.0, "waist_pitch_joint": 3.0, "waist_yaw_joint": 1.5,
+    }
+    cfg.rewards["pose_waist"].params["joint_bands"] = {
+        "waist_roll_joint": 0.06, "waist_pitch_joint": 0.06, "waist_yaw_joint": 0.15,
+    }
+    # -- UPPER (arms) --  target HOME: shoulder_pitch 0.20, roll ±0.20, elbow 0.60
+    _arm_weights = {
+        ".*_shoulder_pitch_joint": 3.0, ".*_shoulder_roll_joint": 3.0,
+        ".*_shoulder_yaw_joint": 2.0, ".*_elbow_joint": 3.0,
+        ".*_wrist_roll_joint": 1.0, ".*_wrist_pitch_joint": 1.0, ".*_wrist_yaw_joint": 1.0,
+    }
+    _arm_bands = {
+        ".*_shoulder_pitch_joint": 0.15, ".*_shoulder_roll_joint": 0.15,
+        ".*_shoulder_yaw_joint": 0.20, ".*_elbow_joint": 0.15,
+        ".*_wrist_roll_joint": 0.30, ".*_wrist_pitch_joint": 0.30, ".*_wrist_yaw_joint": 0.30,
+    }
+    cfg.rewards["pose_upper"].params["target_joint_pos"] = _home
+    cfg.rewards["pose_upper"].params["joint_weights"] = _arm_weights
+    cfg.rewards["pose_upper"].params["joint_bands"] = _arm_bands
+    cfg.rewards["pose_upper"].params["asset_cfg"].site_names = _palm_sites
+    # pose_upper stashes its gated r_arms / r_hand halves each step → logged as the
+    # metrics pose/upper_arms and pose/upper_hand (see metrics registration below), so
+    # a stuck upper score is attributable to arm ANGLES vs hand PLACEMENT.
+
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
 

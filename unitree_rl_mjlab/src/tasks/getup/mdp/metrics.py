@@ -265,6 +265,30 @@ def fall_after_success_active(
     return (state["ever_stood"] & (h < height_threshold)).float()
 
 
+def pose_upper_arms(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Gated r_arms half of pose_upper (arm-ANGLE quality) [B,] (diagnostic).
+
+    Reads the stash pose_upper writes each step (metrics run right after rewards).
+    Paired with ``pose_upper_hand`` it decomposes pose_upper = sqrt(r_arms · r_hand):
+    if this is low while pose_upper_hand is high, the hands are placed but the
+    shoulders/elbows are wrong (the contorted-shoulder failure). Zero if pose_upper
+    is disabled (weight 0 → not computed → no stash)."""
+    d = getattr(env, "_pose_upper_diag", None)
+    if d is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return d["arms"]
+
+
+def pose_upper_hand(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Gated r_hand half of pose_upper (hand-PLACEMENT quality) [B,] (diagnostic).
+    See ``pose_upper_arms``. Both are gated the same way as the pose_upper reward, so
+    they are directly comparable to each other and to Episode_Reward/pose_upper."""
+    d = getattr(env, "_pose_upper_diag", None)
+    if d is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return d["hand"]
+
+
 # ---------------------------------------------------------------------------
 # P1.2 — Termination reason distribution
 #

@@ -382,6 +382,11 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "success/terminal_gate": MetricsTermCfg(func=mdp.terminal_gate_fraction),
         "success/ever_stood": MetricsTermCfg(func=mdp.ever_stood_fraction),
         "success/fall_after_success": MetricsTermCfg(func=mdp.fall_after_success_active),
+        # v31: pose_upper decomposition (arm ANGLES vs hand PLACEMENT). Gated the same
+        # as the pose_upper reward → directly comparable to each other and to
+        # Episode_Reward/pose_upper. Diagnoses a stuck upper-body score.
+        "pose/upper_arms": MetricsTermCfg(func=mdp.pose_upper_arms),
+        "pose/upper_hand": MetricsTermCfg(func=mdp.pose_upper_hand),
         # --- P1.2: Termination reason distribution ---
         "termination/timeout": MetricsTermCfg(func=mdp.termination_timeout),
         "termination/failure": MetricsTermCfg(func=mdp.termination_failure),
@@ -1257,8 +1262,10 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # the torso frame. Signed lateral enforces left-hand-left / right-hand-right;
         # geometric mean per hand + worst-of so no axis and no hand can be farmed.
         # Inherits the old arms_in_front weight (5.0) — the primary arm term.
+        # v31: FOLDED into pose_upper (r_hand_workspace). Kept at weight 0 for optional
+        # separate logging; the placement signal now lives inside pose_upper's sqrt.
         "arm_hand_box": RewardTermCfg(
-            func=mdp.arm_hand_box, weight=5.0,
+            func=mdp.arm_hand_box, weight=0.0,
             params={"x_lo": 0.12, "x_hi": 0.30, "y_lo": 0.12, "y_hi": 0.32,
                     "z_lo": -0.30, "z_hi": 0.00, "margin": 0.10,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
@@ -1269,17 +1276,19 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # pin the redundant DOF that let the arm sweep back / roll against the torso
         # (the persistent left-arm-back-and-touching defect); roll factor is the
         # smooth reincarnation of the v9-ablated style_shoulder_roll_deviation.
+        # v31: SUPERSEDED by pose_upper's joint-space r_arms (shoulder/elbow/wrist
+        # bands, weighted-mean, un-gameable via the sqrt with hand-workspace). Weight 0.
         "arm_elbow_flexion": RewardTermCfg(
-            func=mdp.arm_elbow_flexion, weight=2.0,
+            func=mdp.arm_elbow_flexion, weight=0.0,
             params={"e_lo": 0.35, "e_hi": 0.95, "margin": 0.15,
-                    "sp_lo": 0.00, "sp_hi": 0.45,   # shoulder pitch band (HOME 0.20)
-                    "sr_lo": 0.05, "sr_hi": 0.60,   # shoulder OUTWARD-roll band (HOME 0.20)
+                    "sp_lo": 0.00, "sp_hi": 0.45,
+                    "sr_lo": 0.05, "sr_hi": 0.60,
                     "asset_cfg": SceneEntityCfg("robot")},
         ),
-        # OVEREXTENSION penalty: squared hinge on shoulder→palm distance past l_max
-        # (just above HOME reach ≈0.42). NEGATIVE weight; final-hold gated.
+        # v31: SUPERSEDED — "arms not fully extended" is now the elbow band in
+        # pose_upper's r_arms. Weight 0.
         "arm_overextension": RewardTermCfg(
-            func=mdp.arm_overextension, weight=-2.0,
+            func=mdp.arm_overextension, weight=0.0,
             params={"l_max": 0.50,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
@@ -1292,6 +1301,35 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         "arm_clearance": RewardTermCfg(
             func=mdp.arm_clearance, weight=-5.0,
             params={"d_safe": 0.22,
+                    "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
+        # ===================================================================
+        # v31: BANDED joint-space FINAL-POSE reward, split LEGS / WAIST / UPPER.
+        # exp(-k·L), L = Σw·ReLU(|q-q*|-δ)²/s² / Σw toward HOME. Per-joint dead-zones
+        # (δ) leave small balance corrections free; grouped for tuning/diagnosis.
+        # target_joint_pos / joint_weights / joint_bands / palm sites wired per-robot
+        # in config/g1/env_cfgs.py. Terminal-hold gated. These are the DIRECT pull
+        # that the weak/gameable task-space arm bands never provided.
+        # ===================================================================
+        # scale/k calibrated (CPU perturbation test): crooked hip_roll 0.4rad→0.45,
+        # torso roll 0.2rad→0.59, arm-back→0.30; all full at HOME + inside dead-zones.
+        "pose_legs": RewardTermCfg(
+            func=mdp.pose_legs, weight=6.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
+                    "scale": 0.35, "k": 4.0, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "pose_waist": RewardTermCfg(
+            func=mdp.pose_waist, weight=4.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
+                    "scale": 0.3, "k": 6.0, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        # UPPER: sqrt(r_arms · r_hand_workspace). asset_cfg carries the palm sites.
+        "pose_upper": RewardTermCfg(
+            func=mdp.pose_upper, weight=6.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
+                    "scale": 0.5, "k": 3.0,
+                    "x_lo": 0.12, "x_hi": 0.30, "y_lo": 0.12, "y_hi": 0.32,
+                    "z_lo": -0.30, "z_hi": 0.00, "margin": 0.10,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
         ),
     }
