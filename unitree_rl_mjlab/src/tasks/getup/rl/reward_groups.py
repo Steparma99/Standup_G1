@@ -102,6 +102,11 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "pose_legs": "post_task",
     "pose_waist": "post_task",
     "pose_upper": "post_task",
+    # v32 unbounded L2 companions (negative weight) — restore gradient far from HOME
+    # where the exp-form pose groups above go flat. Same group as their exp partners.
+    "pose_legs_l2": "post_task",
+    "pose_waist_l2": "post_task",
+    "pose_upper_l2": "post_task",
 }
 
 

@@ -387,6 +387,12 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # Episode_Reward/pose_upper. Diagnoses a stuck upper-body score.
         "pose/upper_arms": MetricsTermCfg(func=mdp.pose_upper_arms),
         "pose/upper_hand": MetricsTermCfg(func=mdp.pose_upper_hand),
+        # v32: RAW (ungated, weight-free) per-group joint-pose error. These are the
+        # gate-independent trend to watch — Episode_Reward/pose_*_l2 is confounded by
+        # gate occupancy. A downward trend = joints genuinely approaching HOME.
+        "pose/legs_err": MetricsTermCfg(func=mdp.pose_legs_err),
+        "pose/waist_err": MetricsTermCfg(func=mdp.pose_waist_err),
+        "pose/upper_err": MetricsTermCfg(func=mdp.pose_upper_err),
         # --- P1.2: Termination reason distribution ---
         "termination/timeout": MetricsTermCfg(func=mdp.termination_timeout),
         "termination/failure": MetricsTermCfg(func=mdp.termination_failure),
@@ -1313,24 +1319,58 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
         # ===================================================================
         # scale/k calibrated (CPU perturbation test): crooked hip_roll 0.4rad→0.45,
         # torso roll 0.2rad→0.59, arm-back→0.30; all full at HOME + inside dead-zones.
+        # v32: ramp_from=0.45 (H_STAGE1) — the exp gate now fades in during the RISE
+        # (straightening legs/waist toward HOME while climbing is desired), not only in
+        # the final 0.64-0.80 m sliver. Was ramp_from=None in v31 → gradient only at the
+        # very top, exactly where the exp form is most saturated.
         "pose_legs": RewardTermCfg(
             func=mdp.pose_legs, weight=6.0,
             params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
-                    "scale": 0.35, "k": 4.0, "asset_cfg": SceneEntityCfg("robot")},
+                    "scale": 0.35, "k": 4.0, "ramp_from": 0.45,
+                    "asset_cfg": SceneEntityCfg("robot")},
         ),
         "pose_waist": RewardTermCfg(
             func=mdp.pose_waist, weight=4.0,
             params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
-                    "scale": 0.3, "k": 6.0, "asset_cfg": SceneEntityCfg("robot")},
+                    "scale": 0.3, "k": 6.0, "ramp_from": 0.45,
+                    "asset_cfg": SceneEntityCfg("robot")},
         ),
         # UPPER: sqrt(r_arms · r_hand_workspace). asset_cfg carries the palm sites.
+        # ramp_from KEPT None (unlike legs/waist): ramping the arms in from the rise
+        # phase was the documented v23 regression (see arms_in_front note above — arms
+        # push off behind/beside the body during the rise, pulling them "in front" early
+        # fights the getup). The v32 L2 companion (pose_upper_l2) restores the arm-back
+        # gradient in the terminal HOLD instead — the fix without the early-ramp hazard.
         "pose_upper": RewardTermCfg(
             func=mdp.pose_upper, weight=6.0,
             params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
-                    "scale": 0.5, "k": 3.0,
+                    "scale": 0.5, "k": 3.0, "ramp_from": None,
                     "x_lo": 0.12, "x_hi": 0.30, "y_lo": 0.12, "y_hi": 0.32,
                     "z_lo": -0.30, "z_hi": 0.00, "margin": 0.10,
                     "asset_cfg": SceneEntityCfg("robot", site_names=())},
+        ),
+        # v32: UNBOUNDED L2 COMPANIONS (negative weight). Restore the pull toward HOME
+        # far from target where the exp-form pose groups above go gradient-dead (why
+        # pose_legs sat flat ~0 all of v31). Each reuses its exp partner's cache, so its
+        # target/weights/bands come free from the assignments in config/g1/env_cfgs.py —
+        # nothing extra to wire per joint. Weights are smaller-magnitude than the exp
+        # partners: a gradient SUPPLEMENT, not meant to dominate the group economics
+        # (mirrors the previous post_home_pose_l2 −4.0 scale for an all-joint L2 pull).
+        # Gate ramps match their exp partners (legs/waist 0.45, upper None).
+        "pose_legs_l2": RewardTermCfg(
+            func=mdp.pose_legs_l2, weight=-3.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
+                    "ramp_from": 0.45, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "pose_waist_l2": RewardTermCfg(
+            func=mdp.pose_waist_l2, weight=-2.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
+                    "ramp_from": 0.45, "asset_cfg": SceneEntityCfg("robot")},
+        ),
+        "pose_upper_l2": RewardTermCfg(
+            func=mdp.pose_upper_l2, weight=-3.0,
+            params={"target_joint_pos": {}, "joint_weights": {}, "joint_bands": {},
+                    "ramp_from": None, "asset_cfg": SceneEntityCfg("robot")},
         ),
     }
 

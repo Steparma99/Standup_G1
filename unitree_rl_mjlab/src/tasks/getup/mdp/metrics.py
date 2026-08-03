@@ -289,6 +289,36 @@ def pose_upper_hand(env: "ManagerBasedRlEnv") -> torch.Tensor:
     return d["hand"]
 
 
+# v32: RAW (ungated, weight-free) per-group joint-pose error — the gate-independent
+# debug signal for the L2 companions. Episode_Reward/pose_*_l2 is gate×weight-scaled,
+# so it moves when the robot stands MORE, not only when the pose improves; these
+# metrics recompute the raw weighted-mean banded error straight from each group's cache
+# so a DOWNWARD trend means the joints are genuinely approaching HOME (over ALL envs,
+# standing or not). Complements pose/upper_arms|hand (which are gated).
+def _pose_group_raw_err(env: "ManagerBasedRlEnv", cache_attr: str) -> torch.Tensor:
+    from .rewards import _grouped_pose_l2  # local import: avoid circular at module load
+    cache = getattr(env, cache_attr, None)
+    if cache is None:  # reward term hasn't built the cache yet (first steps)
+        return torch.zeros(env.num_envs, device=env.device)
+    return _grouped_pose_l2(env.scene["robot"], cache)
+
+
+def pose_legs_err(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Raw ungated banded pose error for the LEGS group [B,] (lower = closer to HOME)."""
+    return _pose_group_raw_err(env, "_pose_legs_cache")
+
+
+def pose_waist_err(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Raw ungated banded pose error for the WAIST group [B,] (lower = closer to HOME)."""
+    return _pose_group_raw_err(env, "_pose_waist_cache")
+
+
+def pose_upper_err(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Raw ungated banded pose error for the UPPER (arm joints) group [B,] (lower =
+    closer to HOME). The joint-space half of pose_upper, gate-independent."""
+    return _pose_group_raw_err(env, "_pose_upper_cache")
+
+
 # ---------------------------------------------------------------------------
 # P1.2 — Termination reason distribution
 #

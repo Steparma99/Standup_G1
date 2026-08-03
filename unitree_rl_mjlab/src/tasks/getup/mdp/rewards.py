@@ -2296,6 +2296,15 @@ def terminal_gate(
 #     wasn't revisited in the v27/v28 arm rework and the exact defect (left arm back &
 #     touching torso) came back. v29 folds a smooth OUTWARD-roll band into
 #     arm_elbow_flexion (sr_lo/sr_hi) to cover it without a new term.
+#
+# v32 (ACTIVE, not disabled): pose_{legs,waist,upper}_l2 — unbounded raw-L2 companions
+#   (NEGATIVE weight) to the v31 exp-form pose groups. Reason: exp(-k·L) is gradient-
+#   dead far from target, so pose_legs stayed flat ~0 the whole v31 run. The L2 form's
+#   gradient never vanishes (same fix as post_home_pose_l2 vs post_standing_posture).
+#   Gate ramp: legs/waist ramp_from=0.45 (straightening during the rise is desired);
+#   upper KEPT ramp_from=None on purpose — ramping arms in from the rise phase was the
+#   documented v23 regression (getup_env_cfg.py: arms_in_front note), so the arm fix
+#   relies on the L2 gradient in the terminal HOLD, not on early gating.
 # ---------------------------------------------------------------------------
 
 _ARM_TORSO_ID_CACHE = "_arm_torso_id"
@@ -2426,6 +2435,21 @@ def _grouped_pose_value(asset: Entity, cache: dict, scale: float, k: float) -> t
     return torch.exp(-k * L)
 
 
+def _grouped_pose_l2(asset: Entity, cache: dict) -> torch.Tensor:
+    """RAW weighted-mean banded squared error [B,] (>=0), UNBOUNDED — NO exp/scale.
+
+    Companion to _grouped_pose_value's saturating exp(-k·L): the exp form's gradient
+    ∝ exp(-kL)·∂L/∂q VANISHES far from target (many joints simultaneously outside band),
+    which is exactly where the recurring crooked-leg / arm-back stuck poses live and why
+    pose_legs sat flat near zero the whole v31 run. This raw L2 penalty's gradient grows
+    with distance and never dies — same fix pattern this file already used for
+    post_home_pose_l2 (constant-gradient) vs the exp-form post_standing_posture."""
+    err = asset.data.joint_pos - cache["tgt"]              # [B, J]
+    e2 = _banded_sq_err(err, cache["band"])               # [B, J]  ReLU(|err|-band)²
+    wsum = cache["w"].sum().clamp(min=1e-6)
+    return (cache["w"] * e2).sum(dim=1) / wsum             # [B]  weighted-mean, unbounded
+
+
 def pose_legs(
     env: ManagerBasedRlEnv,
     target_joint_pos: dict[str, float],
@@ -2507,6 +2531,68 @@ def pose_upper(
     }
     r_upper = torch.sqrt((r_arms * r_hand).clamp(min=0.0))       # [B]
     return r_upper * gate
+
+
+# ---------------------------------------------------------------------------
+# v32: UNBOUNDED L2 COMPANIONS for the three v31 banded pose groups.
+# pose_{legs,waist,upper} are exp(-k·L) (bounded, saturating): their gradient dies
+# once the joints are far outside band, so pose_legs stayed flat ~0 for the whole
+# v31 run despite weight 6.0 (raising the weight scales an already-dead signal).
+# These companions return the RAW weighted-mean banded squared error (see
+# _grouped_pose_l2): registered with a NEGATIVE weight so a large pose error is a
+# penalty whose gradient never vanishes, restoring the pull toward HOME far from
+# target — mirrors post_home_pose_l2 (raw) alongside post_standing_posture (exp).
+# They reuse each group's SAME cache (target/weights/bands wired once in env_cfgs.py),
+# so there is nothing extra to configure per-joint.
+# ---------------------------------------------------------------------------
+def pose_legs_l2(
+    env: ManagerBasedRlEnv,
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Unbounded L2 companion to pose_legs (register with NEGATIVE weight). Reuses the
+    pose_legs cache so it shares its target/weights/bands exactly."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = _resolve_pose_cache(env, asset, _POSE_LEGS_CACHE, target_joint_pos, joint_weights, joint_bands)
+    return _grouped_pose_l2(asset, cache) * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def pose_waist_l2(
+    env: ManagerBasedRlEnv,
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Unbounded L2 companion to pose_waist (register with NEGATIVE weight). Reuses the
+    pose_waist cache."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = _resolve_pose_cache(env, asset, _POSE_WAIST_CACHE, target_joint_pos, joint_weights, joint_bands)
+    return _grouped_pose_l2(asset, cache) * _post_gate(asset, height_threshold, ramp_from=ramp_from)
+
+
+def pose_upper_l2(
+    env: ManagerBasedRlEnv,
+    target_joint_pos: dict[str, float],
+    joint_weights: dict[str, float],
+    joint_bands: dict[str, float] | None = None,
+    height_threshold: float = _HOME_HEIGHT,
+    ramp_from: float | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Unbounded L2 companion to pose_upper's r_arms (register with NEGATIVE weight).
+    Covers ONLY the arm JOINT-space part (shoulder/elbow/wrist bands) — the hand-box
+    half of pose_upper already uses f_tol (a non-saturating tolerance shape, not exp)
+    so it needs no L2 companion. Reuses the pose_upper cache."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cache = _resolve_pose_cache(env, asset, _POSE_UPPER_CACHE, target_joint_pos, joint_weights, joint_bands)
+    return _grouped_pose_l2(asset, cache) * _post_gate(asset, height_threshold, ramp_from=ramp_from)
 
 
 def arm_elbow_flexion(

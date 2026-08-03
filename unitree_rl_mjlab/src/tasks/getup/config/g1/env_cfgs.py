@@ -847,6 +847,19 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # metrics pose/upper_arms and pose/upper_hand (see metrics registration below), so
     # a stuck upper score is attributable to arm ANGLES vs hand PLACEMENT.
 
+    # v32: L2 companions share the EXACT same target/weights/bands as their exp partners
+    # (same joint-space error, different shape). pose_upper_l2 covers only the arm
+    # joint-space part (r_arms) — no palm sites needed (the hand-box uses f_tol, not exp).
+    cfg.rewards["pose_legs_l2"].params["target_joint_pos"] = _home
+    cfg.rewards["pose_legs_l2"].params["joint_weights"] = dict(cfg.rewards["pose_legs"].params["joint_weights"])
+    cfg.rewards["pose_legs_l2"].params["joint_bands"] = dict(cfg.rewards["pose_legs"].params["joint_bands"])
+    cfg.rewards["pose_waist_l2"].params["target_joint_pos"] = _home
+    cfg.rewards["pose_waist_l2"].params["joint_weights"] = dict(cfg.rewards["pose_waist"].params["joint_weights"])
+    cfg.rewards["pose_waist_l2"].params["joint_bands"] = dict(cfg.rewards["pose_waist"].params["joint_bands"])
+    cfg.rewards["pose_upper_l2"].params["target_joint_pos"] = _home
+    cfg.rewards["pose_upper_l2"].params["joint_weights"] = dict(_arm_weights)
+    cfg.rewards["pose_upper_l2"].params["joint_bands"] = dict(_arm_bands)
+
     # Both-feet grounded: needs the foot site names to check height.
     cfg.rewards["post_stand_on_feet"].params["asset_cfg"].site_names = site_names
 

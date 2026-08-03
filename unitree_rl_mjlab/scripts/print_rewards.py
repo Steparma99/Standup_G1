@@ -58,6 +58,13 @@ HEALTH_TAGS = [
     # the hands are placed but the shoulders/elbows are still wrong (contorted arm).
     "Episode_Metrics/pose/upper_arms",
     "Episode_Metrics/pose/upper_hand",
+    # v32: RAW ungated per-group joint-pose error (gate/weight-independent). These are
+    # the primary v32 debug signal — should trend DOWN as the L2 companions pull the
+    # legs/waist/arms toward HOME, even though Episode_Reward/pose_* (exp, gated) may
+    # look flat. legs_err was the flat-at-zero mystery in v31.
+    "Episode_Metrics/pose/legs_err",
+    "Episode_Metrics/pose/waist_err",
+    "Episode_Metrics/pose/upper_err",
     "Episode_Metrics/curriculum/assistance_force",
     "Episode_Metrics/curriculum/beta_rescaler",
     # v25: the circuit-breaker internals — beta_paused ~1.0 with beta_success_ema
