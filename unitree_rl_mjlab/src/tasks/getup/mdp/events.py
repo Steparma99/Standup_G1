@@ -759,6 +759,19 @@ def get_episode_state(env: "ManagerBasedRlEnv", asset: "Entity") -> dict:
         # otherwise — debounces chattering ground contact so the double-support balance
         # reward does not flicker. Cleared on reset.
         "foot_contact_latch": torch.zeros(n, 2, device=device, dtype=torch.bool),
+        # --- v32-fromscratch: SHARED STANDING-EVALUATOR state (mdp/standing.py) -------
+        # One definition of standing, used by rewards / metrics / all curricula. See
+        # compute_standing_status(). Counters are in POLICY STEPS (50 Hz).
+        "cand_counter": torch.zeros(n, device=device, dtype=torch.long),   # consec candidate steps
+        "latch_exit_counter": torch.zeros(n, device=device, dtype=torch.long),  # consec exit-cond steps
+        "standing_latched": torch.zeros(n, device=device, dtype=torch.bool),    # hysteretic latch
+        "ever_latched": torch.zeros(n, device=device, dtype=torch.bool),        # latched at least once this episode
+        "stable_counter": torch.zeros(n, device=device, dtype=torch.long),      # consec stable_now steps
+        "stable_hold_reached": torch.zeros(n, device=device, dtype=torch.bool), # hit N_hold this episode
+        "first_stable_step": torch.full((n,), -1, device=device, dtype=torch.long),  # step of first hold (-1=never)
+        "post_latch_bad_counter": torch.zeros(n, device=device, dtype=torch.long),   # consec bad steps after latch
+        "fall_after_stand": torch.zeros(n, device=device, dtype=torch.bool),    # fell after latch
+        "stable_step_accum": torch.zeros(n, device=device, dtype=torch.long),   # total stable steps after first hold
     }
     setattr(env, _EPISODE_STATE_ATTR, state)
     return state
@@ -792,3 +805,12 @@ def reset_episode_state(
     state["stall_counter"][env_ids] = 0
     if "foot_contact_latch" in state:
         state["foot_contact_latch"][env_ids] = False
+    # v32-fromscratch shared standing-evaluator counters (present iff initialised).
+    for _k, _fill in (
+        ("cand_counter", 0), ("latch_exit_counter", 0), ("standing_latched", False),
+        ("ever_latched", False),
+        ("stable_counter", 0), ("stable_hold_reached", False), ("first_stable_step", -1),
+        ("post_latch_bad_counter", 0), ("fall_after_stand", False), ("stable_step_accum", 0),
+    ):
+        if _k in state:
+            state[_k][env_ids] = _fill
