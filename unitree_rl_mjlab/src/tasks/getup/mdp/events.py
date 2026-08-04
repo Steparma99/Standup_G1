@@ -234,9 +234,20 @@ __all__ = [
     "reset_episode_state",
     "settle_zero_velocity",
     "gate_settling_rewards",
+    "attach_fromscratch_cfg",
     "AssistanceCurriculum",
     "BetaRescalerCurriculum",
+    "FromScratchAssistBetaCurriculum",
 ]
+
+
+def attach_fromscratch_cfg(env, env_ids=None, cfg=None) -> None:
+    """Startup event: publish the FromScratchCurriculumCfg on the env so the shared
+    standing evaluator + from-scratch rewards read ONE config object (not per-func
+    defaults). No-op if cfg is None. See standing.get_curriculum_cfg."""
+    del env_ids
+    if cfg is not None:
+        setattr(env, "_fromscratch_cfg", cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +712,165 @@ class BetaRescalerCurriculum:
         # Clear per-episode hold state for the reset envs (ALWAYS, even frozen).
         self._hold_counter[env_ids] = 0
         self._stable_held[env_ids] = False
+
+
+# ---------------------------------------------------------------------------
+# From-scratch GLOBAL coupled assist-force + beta curriculum
+#
+# ONE global lambda_F (assist force) and ONE global beta (action scale), shared by
+# every parallel env and advanced TOGETHER on a conservative rolling success-rate
+# trigger. See CoupledAdvancementCfg (curriculum_cfg.py) for the full rationale.
+# This REPLACES the per-env AssistanceCurriculum + BetaRescalerCurriculum on the
+# single-pose, no-randomization from-scratch branch.
+# ---------------------------------------------------------------------------
+
+_FS_CURRICULUM_ATTR = "_fs_assist_beta_curriculum"  # instance, read by fs metrics
+
+
+class FromScratchAssistBetaCurriculum:
+    """Global, coupled assist-force + beta advancement (conservative rolling trigger).
+
+    Registered with ``mode="step"``:
+      * ``__call__`` runs every control step — applies the global upward assist
+        wrench on the head/torso body (suppressed during the settle window) and
+        caches the shared χ_t stable-hold counter so ``reset`` can read the ending
+        episode's sustained-hold length. (Step events run AFTER the reset block, so
+        the value read at reset is the counter from the PREVIOUS step — a 1-step lag,
+        negligible vs the episode horizon and identical to the legacy head-height
+        caching pattern.)
+      * ``reset`` is called by the event manager for the envs starting a new
+        episode — appends ``success_i = 1[stable_counter >= success_window_steps]``
+        (== the χ_t product over the final window) for each to a rolling
+        deque(maxlen=K); once the deque is full AND its mean clears ``tau_s`` it
+        steps BOTH lambda_F and beta down by their deltas (to their floors) and
+        clears the deque (mandatory reset after every advance).
+
+    The global scalars are mirrored into per-env broadcast tensors published on the
+    env as ``_ASSIST_FORCE_ATTR`` (read by the assistance_force metric) and
+    ``_BETA_RESCALER_ATTR`` (read by the incremental action term + beta metric), so
+    the existing action/observation/metric plumbing works unchanged — every env
+    simply shares the one global level.
+    """
+
+    def __init__(self, cfg, env: "ManagerBasedRlEnv"):
+        from collections import deque
+
+        p = cfg.params
+        self._asset: Entity = env.scene[p["asset_cfg"].name]
+        body_name: str = p["head_body"]
+        ids, _ = self._asset.find_bodies(body_name)
+        assert len(ids) == 1, (
+            f"FromScratchAssistBetaCurriculum: body '{body_name}' matched {len(ids)} "
+            "bodies; expected exactly one (e.g. 'torso_link')."
+        )
+        self._body_id = int(ids[0])
+        self._num_envs = env.num_envs
+        self._device = env.device
+
+        # --- conservative rolling trigger ---
+        self._K = int(p["window_K"])
+        self._tau = float(p["success_rate_threshold"])
+        self._success_window = int(p["success_window_steps"])
+        self._buffer: "deque[float]" = deque(maxlen=self._K)
+
+        # --- global scalar levels (advance together, one shared trigger) ---
+        self._lambda_F = float(p["lambda_F_init"])
+        self._lambda_F_min = float(p["lambda_F_min"])
+        self._d_lambda_F = float(p["delta_lambda_F"])
+        self._beta = float(p["beta_init"])
+        self._beta_min = float(p["beta_min"])
+        self._d_beta = float(p["delta_beta"])
+        self._unactuated_steps = int(p["assist_unactuated_steps"])
+
+        # Sustained-hold length of the ending episode: the shared χ_t stable-hold
+        # counter, cached each step in __call__ and read at reset (1-step lag). Seeded
+        # to zero so the first (pre-step) reset is a clean failure.
+        self._last_stable_counter = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
+        )
+
+        # Per-env broadcast tensors read by the action term / metrics (the global
+        # scalars, filled in place on every advance).
+        self._force_vec = torch.full(
+            (self._num_envs,), self._lambda_F, device=self._device
+        )
+        self._beta_vec = torch.full(
+            (self._num_envs,), self._beta, device=self._device
+        )
+        self._zeros = torch.zeros(self._num_envs, 1, 3, device=self._device)
+
+        # Diagnostics exposed to the fs metrics.
+        self._advance_count = 0
+        self._last_success_rate = 0.0
+
+        setattr(env, _ASSIST_FORCE_ATTR, self._force_vec)
+        setattr(env, _BETA_RESCALER_ATTR, self._beta_vec)
+        setattr(env, _FS_CURRICULUM_ATTR, self)
+
+    # -- diagnostics for metrics ------------------------------------------------
+    @property
+    def buffer_fill(self) -> float:
+        return len(self._buffer) / self._K if self._K > 0 else 0.0
+
+    @property
+    def success_rate(self) -> float:
+        # rolling mean over whatever is currently buffered (0 if empty).
+        return (sum(self._buffer) / len(self._buffer)) if self._buffer else 0.0
+
+    def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
+        del env_ids, kwargs  # step events always act on all envs
+        # Cache the shared χ_t stable-hold counter (memoised this step by the reward
+        # phase; this call just reads it — no double advance). At the next reset this
+        # is the ending episode's sustained-hold length. Local import avoids the
+        # events<->standing circular import at module load.
+        from .standing import compute_standing_status, get_curriculum_cfg
+        status = compute_standing_status(
+            env, self._asset, get_curriculum_cfg(env).stability
+        )
+        self._last_stable_counter = status["stable_counter"].clone()
+
+        # Global upward world-frame assist; suppressed during the settle window so
+        # the robot first settles onto the ground rather than launching at t=0.
+        active = env.episode_length_buf >= self._unactuated_steps
+        forces = self._zeros.clone()
+        forces[:, 0, 2] = self._lambda_F * active.to(self._force_vec.dtype)
+        self._asset.write_external_wrench_to_sim(
+            forces, self._zeros, body_ids=[self._body_id]
+        )
+
+    def reset(self, env_ids=None) -> None:
+        if env_ids is None:
+            env_ids = torch.arange(self._num_envs, device=self._device)
+        # success_i = sustained STABLE HOLD: the shared χ_t indicator held for the
+        # whole final window == (stable_counter >= success_window_steps) at the
+        # ending step. Stricter than a head-height touch; the conservative K-window
+        # (below) rejects lucky one-episode holds.
+        succ = self._last_stable_counter[env_ids] >= self._success_window  # [n] bool
+        self._buffer.extend(1.0 if s else 0.0 for s in succ.tolist())
+
+        # Conservative COUPLED advance: only when the rolling window is FULL and its
+        # success rate clears tau_s. One advance per reset call (never multi-step in
+        # a single batch), then clear the window so the next advance needs another
+        # full K episodes of sustained success.
+        if len(self._buffer) >= self._K:
+            rate = sum(self._buffer) / len(self._buffer)
+            self._last_success_rate = rate
+            if rate >= self._tau:
+                self._lambda_F = max(self._lambda_F - self._d_lambda_F, self._lambda_F_min)
+                self._beta = max(self._beta - self._d_beta, self._beta_min)
+                self._buffer.clear()
+                self._advance_count += 1
+                # Push the new global level into the per-env broadcast tensors.
+                self._force_vec.fill_(self._lambda_F)
+                self._beta_vec.fill_(self._beta)
+
+        # Clear any residual applied wrench on the reset envs (mirrors
+        # AssistanceCurriculum); __call__ rewrites all envs next step anyway.
+        n = len(env_ids) if not isinstance(env_ids, slice) else self._num_envs
+        zeros = torch.zeros(n, 1, 3, device=self._device)
+        self._asset.write_external_wrench_to_sim(
+            zeros, zeros, env_ids=env_ids, body_ids=[self._body_id]
+        )
 
 
 # ---------------------------------------------------------------------------

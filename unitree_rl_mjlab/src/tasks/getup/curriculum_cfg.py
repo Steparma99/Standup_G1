@@ -36,13 +36,20 @@ class StabilityCfg:
     latch_exit_upright: float = 0.70          # ... or upright < 0.70
     latch_exit_consec_steps: int = 10         # ... for 10 consecutive steps
 
-    # --- 2.2 strict stable-standing (stable_now) ---
-    stable_height: float = 0.68               # h_pelvis > 0.68 m
-    stable_upright: float = 0.95              # -projected_gravity_z > 0.95
-    stable_lin_vel: float = 0.25              # |v_base| < 0.25 m/s
-    stable_ang_vel: float = 0.60             # |omega_base| < 0.60 rad/s
-    stable_joint_vel_rms: float = 0.75        # RMS(qdot) < 0.75 rad/s
-    stable_capture_margin: float = 0.03       # capture point <= 0.03 m outside support
+    # --- 2.2 strict stable-standing (χ_t = stable_now) ---
+    # Height is RELATIVE to nominal so the same definition is robust across robots /
+    # slightly-imperfect standing poses: h_pelvis > frac * nominal_pelvis_height.
+    stable_height_frac: float = 0.90          # h_pelvis > 0.90 * nominal
+    nominal_pelvis_height: float = 0.75       # HOME root_link z (measured 0.75 m)
+    stable_upright: float = 0.978             # -proj_grav_z > cos(12°) ≈ 0.978
+    stable_lin_vel: float = 0.15              # |v_base| < 0.15 m/s (conservative)
+    stable_ang_vel: float = 0.35              # |omega_base,xy| < 0.35 rad/s (roll+pitch; NO yaw)
+    # RESERVED — deferred out of χ_t (user 2026-08-04). RMS(qdot) is hard to specify
+    # correctly and is left for a future revision; capture-point-in-support balance is
+    # instead carried by the separate com_over_support reward. Fields kept so the
+    # gates can be re-enabled without a schema change.
+    stable_joint_vel_rms: float = 0.75        # reserved (RMS(qdot) gate, not in χ_t)
+    stable_capture_margin: float = 0.03       # reserved (capture-point gate, not in χ_t)
 
     # --- 2.3 stable-hold criterion ---
     stable_hold_steps: int = 50               # N_hold = 50 steps = 1.0 s (NOT the old 15)
@@ -51,9 +58,12 @@ class StabilityCfg:
     fall_after_stand_height: float = 0.58     # after latch, h < 0.58 ...
     fall_after_stand_consec_steps: int = 20   # ... or lost upright, for 20 consec steps
 
-    # foot-planted force threshold (N) with hysteresis (reuse existing convention)
-    foot_plant_on_n: float = 60.0
-    foot_plant_off_n: float = 30.0
+    # foot-planted force threshold (N) with hysteresis. Lowered 60/30 -> 30/20 for
+    # sim2real robustness: a symmetric quiet stand loads ~200 N/foot (m*g/2), so a
+    # 20-30 N contact-detection threshold has a ~7x margin yet triggers earlier on
+    # noisy real force sensors. (F_z_foot > threshold, the sim2real-friendly criterion.)
+    foot_plant_on_n: float = 30.0
+    foot_plant_off_n: float = 20.0
 
     policy_hz: float = 50.0                    # for step<->second conversions
 
@@ -154,6 +164,67 @@ class BetaCurriculumCfg:
 
 
 # ======================================================================================
+# 6b. GLOBAL COUPLED assist-force + beta advancement (from-scratch branch)
+# ======================================================================================
+@dataclass
+class CoupledAdvancementCfg:
+    """ONE global assist force lambda_F and ONE global action-scale beta, shared by
+    every parallel env, advanced TOGETHER on a conservative rolling success-rate
+    trigger (user decision 2026-08-04). Replaces the per-env HoST
+    AssistanceCurriculum / BetaRescalerCurriculum for the single-pose, no-
+    randomization from-scratch run.
+
+    HoST advances the moment ONE episode's head clears H_head — a single lucky
+    episode retires the help before the policy is robust. This trigger instead
+    requires the WHOLE population to sustain tau_s success over the last K episode
+    terminations, where SUCCESS itself is a sustained STABLE HOLD (the product of the
+    shared χ_t = is_stable indicator over the final `success_window_steps` of the
+    episode), NOT a single-step head touch:
+
+        success_i = ∏_{t=T-N+1}^{T} χ_t   ==   (stable_counter >= N at episode end)
+        buffer = deque(maxlen=K)
+        on each episode end: buffer.append(success_i)
+        if len(buffer) == K and mean(buffer) >= tau_s:
+            lambda_F <- max(lambda_F - delta_lambda_F, lambda_F_min)
+            beta     <- max(beta     - delta_beta,     beta_min)
+            buffer.clear()          # mandatory reset after every advance
+
+    This is STRICTER than HoST (a whole final window must be stable, not one frame),
+    so tau_s may need lowering (0.85 -> ~0.75) if early flickering is high. Assist and
+    beta are COUPLED (one shared trigger) so difficulty rises along a single axis:
+    each advance simultaneously removes support force AND shrinks the per-step action
+    authority, exactly when the policy has proven robust at the current level.
+    """
+    # --- conservative rolling trigger ---
+    window_K: int = 128                     # rolling success-buffer length (episodes)
+    success_rate_threshold: float = 0.85    # tau_s (lower to ~0.75 if flicker is high)
+
+    # --- success predicate: sustained STABLE HOLD (χ_t product) at episode end ---
+    # success_i = (stable_counter >= success_window_steps) at the episode's final
+    # step == the shared is_stable indicator held for the whole final window. Started
+    # at 50 (1.0 s), matching the reward hold N_hold (fs_success_bonus / fs_progressive
+    # _hold) so success and reward align; raise toward 100 (2 s) once flicker is low.
+    success_window_steps: int = 50
+
+    # Body the global upward assist wrench is applied to (head/torso proxy).
+    head_body: str = "torso_link"
+
+    # --- assist force lambda_F (Newtons, single global scalar) ---
+    lambda_F_init: float = 200.0
+    lambda_F_min: float = 0.0
+    delta_lambda_F: float = 10.0
+
+    # --- action-scale beta (single global scalar) ---
+    beta_init: float = 1.0
+    beta_min: float = 0.25
+    delta_beta: float = 0.02
+
+    # assist is suppressed during the settle window (no launch at t=0); matches the
+    # action settle_steps / legacy _ASSIST_UNACTUATED_STEPS convention.
+    assist_unactuated_steps: int = 60
+
+
+# ======================================================================================
 # 9-10. Pose randomization + expansion
 # ======================================================================================
 @dataclass
@@ -224,6 +295,7 @@ class FromScratchCurriculumCfg:
     stability: StabilityCfg = field(default_factory=StabilityCfg)
     performance: PerformanceWindowCfg = field(default_factory=PerformanceWindowCfg)
     assistance: AssistanceCurriculumCfg = field(default_factory=AssistanceCurriculumCfg)
+    coupled: CoupledAdvancementCfg = field(default_factory=CoupledAdvancementCfg)
     action: ActionProcessingCfg = field(default_factory=ActionProcessingCfg)
     beta: BetaCurriculumCfg = field(default_factory=BetaCurriculumCfg)
     pose_randomization: PoseRandomizationCfg = field(default_factory=PoseRandomizationCfg)

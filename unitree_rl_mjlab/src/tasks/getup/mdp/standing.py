@@ -43,6 +43,20 @@ if TYPE_CHECKING:
 
 _STATUS_ATTR = "_standing_status"
 _STATUS_STEP_ATTR = "_standing_status_step"
+_CFG_ATTR = "_fromscratch_cfg"
+
+
+def get_curriculum_cfg(env: "ManagerBasedRlEnv"):
+    """Return the FromScratchCurriculumCfg carried on the env (single source of truth).
+
+    Attached by the from-scratch env builder; falls back to defaults if absent so the
+    evaluator/rewards are safe to call from any context (e.g. a bare unit test)."""
+    cfg = getattr(env, _CFG_ATTR, None)
+    if cfg is None:
+        from ..curriculum_cfg import FromScratchCurriculumCfg
+        cfg = FromScratchCurriculumCfg()
+        setattr(env, _CFG_ATTR, cfg)
+    return cfg
 _BODY_JOINT_MASK_ATTR = "_standing_body_joint_mask"
 # 29 controlled body joints (exclude the 14 PD-held finger joints) for RMS(qdot).
 _BODY_JOINT_PATTERNS = (
@@ -136,10 +150,9 @@ def compute_standing_status(
     h = asset.data.root_link_pos_w[:, 2]
     upright = torch.clamp(-asset.data.projected_gravity_b[:, 2], -1.0, 1.0)
     v_base = asset.data.root_link_lin_vel_b[:, :3].norm(dim=1)
-    w_base = asset.data.root_link_ang_vel_b[:, :3].norm(dim=1)
-    mask = _body_joint_mask(env, asset)
-    qd = asset.data.joint_vel[:, mask]
-    qd_rms = qd.pow(2).mean(dim=1).sqrt()
+    # χ_t angular gate is the HORIZONTAL (roll+pitch) rate only — yaw drift in place is
+    # not an instability, so it is excluded (user 2026-08-04).
+    w_base_xy = asset.data.root_link_ang_vel_b[:, :2].norm(dim=1)
     both_feet = _feet_planted(env, cfg)
 
     # --- 2.1 candidate + hysteretic latch ---------------------------------------
@@ -162,14 +175,16 @@ def compute_standing_status(
     # NOT the hysteretic latch, which would itself exit before the 20-step fall window).
     state["ever_latched"] = state["ever_latched"] | newly
 
-    # --- 2.2 strict stable_now --------------------------------------------------
-    cp_margin = _capture_point_margin(env, asset)             # >0 inside polygon
-    cp_ok = cp_margin >= -cfg.stable_capture_margin
-    cp_ok = cp_ok & torch.isfinite(cp_margin)                 # invalid -> not stable
+    # --- 2.2 strict stable_now (χ_t) --------------------------------------------
+    # Conditions (user 2026-08-04): relative pelvis height, cos(12°) upright, tight
+    # linear + horizontal-angular velocities, both feet planted (force sensor). The
+    # RMS(qdot) and capture-point gates are DEFERRED out of χ_t (see StabilityCfg);
+    # capture-point balance is carried by the separate com_over_support reward.
+    h_thresh = cfg.stable_height_frac * cfg.nominal_pelvis_height
     stable_now = (
-        (h > cfg.stable_height) & (upright > cfg.stable_upright)
-        & (v_base < cfg.stable_lin_vel) & (w_base < cfg.stable_ang_vel)
-        & (qd_rms < cfg.stable_joint_vel_rms) & both_feet & cp_ok
+        (h > h_thresh) & (upright > cfg.stable_upright)
+        & (v_base < cfg.stable_lin_vel) & (w_base_xy < cfg.stable_ang_vel)
+        & both_feet
     )
 
     # --- 2.3 stable hold counter ------------------------------------------------

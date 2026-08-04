@@ -107,6 +107,16 @@ REWARD_GROUP_MAP: dict[str, str] = {
     "pose_legs_l2": "post_task",
     "pose_waist_l2": "post_task",
     "pose_upper_l2": "post_task",
+    # From-scratch curriculum V2 — simplified 8-term post-task set (rewards_fromscratch.py).
+    # Active ONLY in the Unitree-G1-GetUp-Scratch config; harmless extra map entries for
+    # the legacy task (never instantiated there).
+    "fs_upright": "post_task",
+    "fs_double_support": "post_task",
+    "fs_dynamic_stillness": "post_task",
+    "fs_banded_pose": "post_task",
+    "fs_progressive_hold": "post_task",
+    "fs_success_bonus": "post_task",
+    "fs_anti_jump": "post_task",
 }
 
 

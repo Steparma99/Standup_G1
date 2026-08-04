@@ -37,6 +37,8 @@ __all__ = [
     "HandHoldActionCfg",
     "LowPassJointPositionAction",
     "LowPassJointPositionActionCfg",
+    "IncrementalJointPositionAction",
+    "IncrementalJointPositionActionCfg",
 ]
 
 
@@ -296,6 +298,91 @@ class LowPassJointPositionAction(JointPositionAction):
         self._set_if_present(self, "_processed_actions", default, env_ids)
 
 
+class IncrementalJointPositionAction(LowPassJointPositionAction):
+    """HoST-style INCREMENTAL joint-position action (from-scratch curriculum V2).
+
+        q^d_t = q_t + beta * s_j * a_t
+
+    where q_t is the CURRENT MEASURED joint position (not a fixed HOME anchor),
+    a_t in [-1,1]^29, s_j is a per-joint max target increment (rad/step, ~= v_max*dt),
+    and beta is the curriculum rescaler. This replaces the additive-residual scheme
+    q^d = q_HOME + beta*a used by the parent class — a decaying beta here shrinks the
+    per-step MOTION, not the reachable envelope around HOME (the paper's intent).
+
+    Overlapping target-processing is DISABLED for this branch: no EMA (the increment
+    already limits per-step target motion) and no normal slew limit; only an emergency
+    per-step clamp (should never bind under nominal beta*s_j <= ~0.05 rad) remains as a
+    safety net. Final targets are clamped to the soft joint-position limits.
+    """
+
+    cfg: "IncrementalJointPositionActionCfg"
+
+    def __init__(self, cfg: "IncrementalJointPositionActionCfg", env: "ManagerBasedRlEnv"):
+        super().__init__(cfg, env)
+        # Per-joint increment scale s_j (rad/step). Resolve the regex dict against the
+        # controlled joint names; unmatched joints get default_delta_scale.
+        vals = resolve_expr(dict(cfg.delta_scale), tuple(self._target_names),
+                            float(cfg.default_delta_scale))
+        self._delta_scale = torch.tensor(
+            vals, dtype=torch.float, device=self.device
+        ).unsqueeze(0)  # [1, A]
+        self._action_ramp_steps = max(int(cfg.action_ramp_steps), 1)
+        # Emergency absolute per-step target-change clamp (safety only).
+        self._emergency_delta = float(cfg.emergency_rate_limit_rad_s) * float(env.step_dt)
+        # Diagnostics for logging (section 16 action-processing group).
+        self._scaled_increment = torch.zeros_like(self._delta_scale.expand(self.num_envs, -1)).clone()
+
+    @property
+    def scaled_increment(self) -> torch.Tensor:
+        """beta * s_j * a actually added to q_current this step [B, A] (pre-clamp)."""
+        return self._scaled_increment
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        self._raw_policy_actions = actions.clone()
+        a = torch.clamp(actions, -1.0, 1.0)
+        self._clipped_raw_actions = a
+
+        beta = self._read_beta()  # [B,1] or scalar 1.0
+        q_cur = self._entity.data.joint_pos[:, self._target_ids]  # [B, A] measured
+
+        # Action ramp: fade the increment in linearly over action_ramp_steps AFTER the
+        # settle window (avoids an abrupt first commanded target). [B,1].
+        if self._settle_steps > 0 or self._action_ramp_steps > 1:
+            steps_since_settle = (
+                self._env.episode_length_buf - self._settle_steps
+            ).clamp(min=0)
+            ramp = (steps_since_settle.float() / self._action_ramp_steps).clamp(0.0, 1.0).unsqueeze(-1)
+        else:
+            ramp = 1.0
+
+        increment = beta * self._delta_scale * a * ramp  # [B, A]
+        self._scaled_increment = increment
+        desired_target = q_cur + increment
+
+        # Emergency absolute clamp (safety net; nominal increment << this bound).
+        delta = torch.clamp(desired_target - q_cur, -self._emergency_delta, self._emergency_delta)
+        desired_target = q_cur + delta
+
+        self._filtered_target_unclamped = desired_target
+        self._processed_actions = self._clamp_to_joint_limits(desired_target)
+        # keep filter state on the realizable command (used by parent reset/logging)
+        self._filtered_target = self._processed_actions.clone()
+
+        # --- settling phase: hold at current measured pose, policy ignored ---
+        if self._settle_steps > 0:
+            in_settle = self._env.episode_length_buf < self._settle_steps
+            if bool(in_settle.any()):
+                hold = self._entity.data.joint_pos[:, self._target_ids]
+                mask = in_settle.unsqueeze(-1)
+                self._processed_actions = torch.where(mask, hold, self._processed_actions)
+                self._filtered_target = torch.where(mask, hold, self._filtered_target)
+                self._filtered_target_unclamped = torch.where(
+                    mask, hold, self._filtered_target_unclamped)
+                self._scaled_increment = torch.where(
+                    mask, torch.zeros_like(self._scaled_increment), self._scaled_increment)
+        self._backfill_history()
+
+
 class HandHoldAction(ActionTerm):
     """Zero-action-dim term that PD-holds a joint group at a fixed target pose.
 
@@ -433,3 +520,29 @@ class LowPassJointPositionActionCfg(JointPositionActionCfg):
 
     def build(self, env: "ManagerBasedRlEnv") -> LowPassJointPositionAction:
         return LowPassJointPositionAction(self, env)
+
+
+@dataclass(kw_only=True)
+class IncrementalJointPositionActionCfg(LowPassJointPositionActionCfg):
+    """Configuration for IncrementalJointPositionAction (from-scratch curriculum V2).
+
+    q^d = q_current + beta * s_j * a. Inherits settle_steps / default_pos_override from
+    the parent but IGNORES its EMA/slew fields (alpha/max_rate/liftoff*): set alpha=1.0
+    and max_rate=None so nothing overlaps the increment. See ActionProcessingCfg."""
+
+    delta_scale: dict[str, float] | None = None
+    """Per-joint max target increment s_j (rad/step), regex -> value. ~= v_max * dt_policy.
+    Unmatched controlled joints use `default_delta_scale`."""
+
+    default_delta_scale: float = 0.04
+    """Fallback s_j (rad/step) for controlled joints not matched by `delta_scale`."""
+
+    action_ramp_steps: int = 20
+    """Linear fade-in of the increment over this many env-steps after the settle window."""
+
+    emergency_rate_limit_rad_s: float = 12.0
+    """Safety-only absolute per-step target-change clamp (rad/s). Should never bind under
+    nominal beta*s_j (~0.05 rad/step); a last-resort guard, NOT a normal-operation slew."""
+
+    def build(self, env: "ManagerBasedRlEnv") -> "IncrementalJointPositionAction":
+        return IncrementalJointPositionAction(self, env)

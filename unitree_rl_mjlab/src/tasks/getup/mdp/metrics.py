@@ -46,6 +46,7 @@ from .events import (
     _ASSIST_FORCE_ATTR,
     _BETA_CURRICULUM_ATTR,
     _BETA_RESCALER_ATTR,
+    _FS_CURRICULUM_ATTR,
     get_episode_state,
 )
 
@@ -99,6 +100,42 @@ def beta_success_ema(env: "ManagerBasedRlEnv") -> torch.Tensor:
     if cur is None:
         return torch.ones(env.num_envs, device=env.device)
     return torch.full((env.num_envs,), cur._success_ema, device=env.device)
+
+
+def fs_curriculum_success_rate(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Rolling success rate of the from-scratch coupled assist/beta curriculum [B,].
+
+    Mean of the current success buffer (fraction of the last <=K episode
+    terminations whose final head height cleared H_head). The advance trigger fires
+    when this reaches tau_s (0.85) AND the buffer is full. Returns zeros when the
+    from-scratch curriculum is not attached.
+    """
+    cur = getattr(env, _FS_CURRICULUM_ATTR, None)
+    if cur is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.full((env.num_envs,), cur.success_rate, device=env.device)
+
+
+def fs_curriculum_buffer_fill(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Fill fraction (len/K) of the from-scratch curriculum's success buffer [B,]."""
+    cur = getattr(env, _FS_CURRICULUM_ATTR, None)
+    if cur is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.full((env.num_envs,), cur.buffer_fill, device=env.device)
+
+
+def fs_curriculum_advances(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Number of coupled advances taken so far by the from-scratch curriculum [B,].
+
+    Each advance stepped lambda_F down by delta_lambda_F and beta down by
+    delta_beta. Monotone non-decreasing over a run.
+    """
+    cur = getattr(env, _FS_CURRICULUM_ATTR, None)
+    if cur is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.full(
+        (env.num_envs,), float(cur._advance_count), device=env.device
+    )
 
 
 def beta_paused(env: "ManagerBasedRlEnv") -> torch.Tensor:
