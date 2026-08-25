@@ -169,7 +169,18 @@ class BetaCurriculumCfg:
 @dataclass
 class CoupledAdvancementCfg:
     """ONE global assist force lambda_F and ONE global action-scale beta, shared by
-    every parallel env, advanced TOGETHER on a conservative rolling success-rate
+    every parallel env, advanced TOGETHER.
+
+    NOTE (2026-08-25): the rolling K-window trigger described below is DEMOTED to a
+    diagnostic whenever DeterministicEvalCfg.enabled is True (the default). It still
+    fills its buffer and still backs the curriculum/fs_success_rate metric — the
+    stochastic training success rate is useful to watch — but advancement is decided
+    by the separate deterministic evaluation (see DeterministicEvalCfg and
+    rl/deterministic_eval.py), because the training rollout samples a_t ~ N(mu, sigma)
+    and so measures the exploration process rather than the policy's competence. The
+    text below therefore describes the FALLBACK path (deterministic_eval disabled).
+
+    Advanced on a conservative rolling success-rate
     trigger (user decision 2026-08-04). Replaces the per-env HoST
     AssistanceCurriculum / BetaRescalerCurriculum for the single-pose, no-
     randomization from-scratch run.
@@ -222,6 +233,90 @@ class CoupledAdvancementCfg:
     # assist is suppressed during the settle window (no launch at t=0); matches the
     # action settle_steps / legacy _ASSIST_UNACTUATED_STEPS convention.
     assist_unactuated_steps: int = 60
+
+
+# ======================================================================================
+# 6c. DETERMINISTIC EVALUATION — the advancement authority (M3)
+# ======================================================================================
+@dataclass
+class DeterministicEvalCfg:
+    """Curriculum advancement is decided by a SEPARATE deterministic evaluation, never
+    by the stochastic training rollout (user decision 2026-08-25).
+
+    Rationale: during training the policy acts as a_t ~ N(mu_theta(o_t), sigma), so the
+    rolling training success rate measures the *exploration process*, not the policy's
+    competence. Advancing on it couples curriculum progress to the entropy schedule.
+    Every `interval` iterations the runner therefore pauses learning and rolls out
+    a_t = mu_theta(o_t) (the mean action) for one full episode horizon on every env,
+    producing a single sharp estimate p_hat, and the coupled (lambda_F, beta) level
+    steps down at most ONCE per evaluation.
+
+    The K-window rolling trigger in FromScratchAssistBetaCurriculum is DEMOTED to a
+    diagnostic (curriculum/fs_success_rate) — it no longer advances anything.
+
+    Statistics: with N independent episodes, SE(p_hat) = sqrt(p(1-p)/N). At p=0.85 that
+    is 1.58 pp for N=512 and 0.79 pp for N=2048. Because the vectorised sim steps every
+    env during the evaluation regardless, counting ALL envs is free and strictly better
+    — hence n_eval = 0 (= use all envs) by default.
+
+    CAVEAT worth remembering: in this phase the env has NO randomization (one canonical
+    SUPINE keyframe, no encoder-bias/CoM/friction events), so the only thing decorrelating
+    the N episodes is the observation noise (Unoise on the actor obs group). p_hat is
+    therefore "robustness to sensor noise from one initial condition", and the binomial
+    SE understates the true uncertainty because the episodes share an initial state.
+    Observation noise is deliberately kept ON during evaluation: it is the deployment
+    condition AND the only source of episode-to-episode variation.
+    """
+
+    enabled: bool = True
+
+    # --- sample size / horizon -------------------------------------------------
+    n_eval: int = 0                # episodes counted; 0 == ALL envs (recommended)
+    max_eval_steps: int = 500      # one full episode horizon (episode_length_s=10 @ 50 Hz)
+
+    # --- paired evaluations ----------------------------------------------------
+    # The torch RNG state is saved, re-seeded with this constant before every
+    # evaluation, and restored afterwards, so consecutive evaluations see the SAME N
+    # observation-noise sequences. p_hat differences then reflect a change in the
+    # policy rather than a different noise draw — which is exactly what the
+    # anti-fluke guard below measures. Training RNG is unaffected.
+    # Pairing is APPROXIMATE, not bit-exact: re-seeding fixes every torch-side draw
+    # (reset sampling, observation noise), but residual simulator state that
+    # env.reset() does not clear (e.g. solver warm-start) still perturbs trajectories
+    # slightly — a CPU probe reproduced p_hat exactly while the mean episode length
+    # moved by ~2 steps.
+    paired_seed: int | None = 20260825   # None == free-running RNG
+
+    # --- phase-dependent evaluation interval (iterations) ----------------------
+    # Early progress is fast, so evaluate often; once the support force is gone and
+    # only beta is shrinking, each level takes longer to master and evaluating less
+    # often costs less throughput.
+    #   phase A: lambda_F > 0                      (assist + beta both retreating)
+    #   phase B: lambda_F == 0 and beta > beta_min (beta only)
+    #   phase C: beta == beta_min                  (final unassisted validation)
+    interval_phase_a: int = 50
+    interval_phase_b: int = 75
+    interval_phase_c: int = 100
+
+    # --- advancement rule ------------------------------------------------------
+    # Advance iff p_hat >= tau_s, EXCEPT when the previous evaluation was far below
+    # threshold (p_prev < tau_s - guard_delta): a jump that large is more likely a
+    # fluke than real mastery, so a second consecutive evaluation >= tau_s is required
+    # to confirm. guard_delta = 0.08 is ~5 sigma at N=512 and ~10 sigma at N=2048, so
+    # the guard responds to genuine drops, never to sampling noise.
+    success_rate_threshold: float = 0.85   # tau_s
+    guard_delta: float = 0.08
+
+    # --- rollback on a broken level --------------------------------------------
+    # Without this, an advance the policy cannot solve stalls the run forever at one
+    # level (every failed evaluation costs a full interval). On `rollback_consecutive`
+    # evaluations below `rollback_success_rate`, step ONE level back UP (lambda_F and
+    # beta both increase by their deltas) and require `readvance_consecutive`
+    # evaluations >= tau_s before advancing again.
+    rollback_enabled: bool = True
+    rollback_success_rate: float = 0.40
+    rollback_consecutive: int = 2
+    readvance_consecutive: int = 2
 
 
 # ======================================================================================
@@ -296,6 +391,7 @@ class FromScratchCurriculumCfg:
     performance: PerformanceWindowCfg = field(default_factory=PerformanceWindowCfg)
     assistance: AssistanceCurriculumCfg = field(default_factory=AssistanceCurriculumCfg)
     coupled: CoupledAdvancementCfg = field(default_factory=CoupledAdvancementCfg)
+    deterministic_eval: DeterministicEvalCfg = field(default_factory=DeterministicEvalCfg)
     action: ActionProcessingCfg = field(default_factory=ActionProcessingCfg)
     beta: BetaCurriculumCfg = field(default_factory=BetaCurriculumCfg)
     pose_randomization: PoseRandomizationCfg = field(default_factory=PoseRandomizationCfg)

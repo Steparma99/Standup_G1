@@ -12,6 +12,14 @@ is_stable indicator held for the final window, stable_counter >= success_window_
 No single lucky episode can retire the help — the whole population must sustain the
 success rate before both the support force and the action authority step down. Still a
 single canonical SUPINE pose with ALL randomization OFF (pose expansion = later milestone).
+
+M3 moves the ADVANCEMENT AUTHORITY off that rolling trigger and onto a separate
+DETERMINISTIC EVALUATION (curriculum_cfg.DeterministicEvalCfg + rl/deterministic_eval.py):
+every `interval` iterations the runner pauses learning and rolls out a_t = mu_theta(o_t)
+— no sampling — across every env for one episode horizon, and the coupled level steps
+down at most once per evaluation. The K-window keeps filling and keeps backing
+curriculum/fs_success_rate, but it no longer moves anything: a stochastic rollout
+measures the exploration process, not the policy's competence.
 """
 
 from __future__ import annotations

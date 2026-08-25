@@ -35,7 +35,12 @@ CfgShim = namedtuple("CfgShim", ["params"])
 
 # Monkeypatch the shared evaluator: __call__ caches status["stable_counter"], so we
 # feed it env._fake_stable_counter and a dummy cfg with a .stability attribute.
-S.compute_standing_status = lambda env, asset, cfg: {"stable_counter": env._fake_stable_counter}
+S.compute_standing_status = lambda env, asset, cfg: {
+    "stable_counter": env._fake_stable_counter,
+    # companion fields cached by __call__ for the deterministic evaluator's sink
+    "fall_after_stand": torch.zeros(B, dtype=torch.bool),
+    "first_stable_step": torch.full((B,), -1, dtype=torch.long),
+}
 S.get_curriculum_cfg = lambda env: type("C", (), {"stability": None})()
 
 
@@ -59,6 +64,7 @@ class FakeEnv:
         self.scene = {"robot": FakeAsset()}
         self.episode_length_buf = torch.full((B,), 100, dtype=torch.long)  # past settle
         self._fake_stable_counter = torch.zeros(B, dtype=torch.long)
+        self.common_step_counter = 0
 
 
 def make(cfg_over=None):

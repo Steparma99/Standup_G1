@@ -774,10 +774,12 @@ class FromScratchAssistBetaCurriculum:
         self._buffer: "deque[float]" = deque(maxlen=self._K)
 
         # --- global scalar levels (advance together, one shared trigger) ---
-        self._lambda_F = float(p["lambda_F_init"])
+        self._lambda_F_init = float(p["lambda_F_init"])
+        self._lambda_F = self._lambda_F_init
         self._lambda_F_min = float(p["lambda_F_min"])
         self._d_lambda_F = float(p["delta_lambda_F"])
-        self._beta = float(p["beta_init"])
+        self._beta_init = float(p["beta_init"])
+        self._beta = self._beta_init
         self._beta_min = float(p["beta_min"])
         self._d_beta = float(p["delta_beta"])
         self._unactuated_steps = int(p["assist_unactuated_steps"])
@@ -788,6 +790,33 @@ class FromScratchAssistBetaCurriculum:
         self._last_stable_counter = torch.zeros(
             self._num_envs, device=self._device, dtype=torch.long
         )
+        # Companion caches, same 1-step lag, read by the deterministic evaluator's sink
+        # at the episode boundary. They MUST be cached here rather than read at reset:
+        # `reset_episode_state` (a mode="reset" event) clears the shared episode state
+        # BEFORE the event manager calls this term's reset().
+        self._last_fall_after_stand = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.bool
+        )
+        self._last_first_stable_step = torch.full(
+            (self._num_envs,), -1, device=self._device, dtype=torch.long
+        )
+        self._last_ep_len = torch.zeros(
+            self._num_envs, device=self._device, dtype=torch.long
+        )
+        self._last_common_step = 0
+
+        # --- advancement authority ------------------------------------------------
+        # True  == legacy behaviour: the rolling K-window trigger below advances the
+        #          level itself.
+        # False == DEMOTED: the buffer is still filled (so curriculum/fs_success_rate
+        #          keeps reporting the stochastic training success rate) but it never
+        #          advances anything; the deterministic evaluator owns advancement.
+        self._autonomous = True
+        # While frozen (during a deterministic evaluation) episode ends are routed to
+        # `_eval_sink` instead of the rolling buffer, so evaluation episodes never
+        # contaminate the training-time diagnostic.
+        self._frozen = False
+        self._eval_sink = None
 
         # Per-env broadcast tensors read by the action term / metrics (the global
         # scalars, filled in place on every advance).
@@ -817,6 +846,105 @@ class FromScratchAssistBetaCurriculum:
         # rolling mean over whatever is currently buffered (0 if empty).
         return (sum(self._buffer) / len(self._buffer)) if self._buffer else 0.0
 
+    # -- level state / advancement API (used by the deterministic evaluator) -----
+    @property
+    def lambda_F(self) -> float:
+        return self._lambda_F
+
+    @property
+    def beta(self) -> float:
+        return self._beta
+
+    @property
+    def lambda_F_min(self) -> float:
+        return self._lambda_F_min
+
+    @property
+    def beta_min(self) -> float:
+        return self._beta_min
+
+    @property
+    def beta_init(self) -> float:
+        return self._beta_init
+
+    @property
+    def advance_count(self) -> int:
+        return self._advance_count
+
+    @property
+    def success_window_steps(self) -> int:
+        return self._success_window
+
+    @property
+    def at_floor(self) -> bool:
+        """True once BOTH global scalars have reached their floors."""
+        return self._lambda_F <= self._lambda_F_min and self._beta <= self._beta_min
+
+    def set_autonomous(self, autonomous: bool) -> None:
+        """Enable/disable the rolling K-window trigger's authority to advance.
+
+        Called with False by the deterministic evaluator so the level moves only on a
+        deterministic measurement. The buffer keeps filling either way (it backs the
+        curriculum/fs_success_rate diagnostic).
+        """
+        self._autonomous = bool(autonomous)
+
+    def _publish(self) -> None:
+        """Push the global scalars into the per-env broadcast tensors."""
+        self._force_vec.fill_(self._lambda_F)
+        self._beta_vec.fill_(self._beta)
+
+    def advance(self) -> tuple[float, float]:
+        """Step BOTH global scalars one level down (toward their floors)."""
+        self._lambda_F = max(self._lambda_F - self._d_lambda_F, self._lambda_F_min)
+        self._beta = max(self._beta - self._d_beta, self._beta_min)
+        self._advance_count += 1
+        self._buffer.clear()
+        self._publish()
+        return self._lambda_F, self._beta
+
+    def rollback(self) -> tuple[float, float]:
+        """Step BOTH global scalars one level back UP (toward their initial values).
+
+        Used when a level turns out to be unsolvable: without it the run stalls at that
+        level indefinitely, burning one evaluation interval per failed attempt.
+        """
+        self._lambda_F = min(self._lambda_F + self._d_lambda_F, self._lambda_F_init)
+        self._beta = min(self._beta + self._d_beta, self._beta_init)
+        self._advance_count -= 1
+        self._buffer.clear()
+        self._publish()
+        return self._lambda_F, self._beta
+
+    # -- evaluation freeze -------------------------------------------------------
+    def freeze(self, sink) -> None:
+        """Route episode ends to `sink(env_ids, success, info)` and stop the trigger.
+
+        The assist wrench keeps being applied at the CURRENT lambda_F — it is part of
+        the difficulty level being measured, not a training-only aid.
+        """
+        self._frozen = True
+        self._eval_sink = sink
+
+    def unfreeze(self) -> None:
+        self._frozen = False
+        self._eval_sink = None
+
+    def latest_episode_snapshot(self) -> dict:
+        """The per-env caches from the last __call__ (1-step lag).
+
+        Fallback for the evaluator when an env never terminated inside the evaluation
+        horizon, so its (unfinished) episode still contributes its current hold length
+        instead of being silently dropped.
+        """
+        return {
+            "stable_counter": self._last_stable_counter,
+            "fall_after_stand": self._last_fall_after_stand,
+            "first_stable_step": self._last_first_stable_step,
+            "episode_length": self._last_ep_len,
+            "common_step": self._last_common_step,
+        }
+
     def __call__(self, env: "ManagerBasedRlEnv", env_ids=None, **kwargs) -> None:
         del env_ids, kwargs  # step events always act on all envs
         # Cache the shared χ_t stable-hold counter (memoised this step by the reward
@@ -828,6 +956,10 @@ class FromScratchAssistBetaCurriculum:
             env, self._asset, get_curriculum_cfg(env).stability
         )
         self._last_stable_counter = status["stable_counter"].clone()
+        self._last_fall_after_stand = status["fall_after_stand"].clone()
+        self._last_first_stable_step = status["first_stable_step"].clone()
+        self._last_ep_len = env.episode_length_buf.clone()
+        self._last_common_step = int(env.common_step_counter)
 
         # Global upward world-frame assist; suppressed during the settle window so
         # the robot first settles onto the ground rather than launching at t=0.
@@ -846,23 +978,43 @@ class FromScratchAssistBetaCurriculum:
         # ending step. Stricter than a head-height touch; the conservative K-window
         # (below) rejects lucky one-episode holds.
         succ = self._last_stable_counter[env_ids] >= self._success_window  # [n] bool
-        self._buffer.extend(1.0 if s else 0.0 for s in succ.tolist())
 
-        # Conservative COUPLED advance: only when the rolling window is FULL and its
-        # success rate clears tau_s. One advance per reset call (never multi-step in
-        # a single batch), then clear the window so the next advance needs another
-        # full K episodes of sustained success.
-        if len(self._buffer) >= self._K:
-            rate = sum(self._buffer) / len(self._buffer)
-            self._last_success_rate = rate
-            if rate >= self._tau:
-                self._lambda_F = max(self._lambda_F - self._d_lambda_F, self._lambda_F_min)
-                self._beta = max(self._beta - self._d_beta, self._beta_min)
-                self._buffer.clear()
-                self._advance_count += 1
-                # Push the new global level into the per-env broadcast tensors.
-                self._force_vec.fill_(self._lambda_F)
-                self._beta_vec.fill_(self._beta)
+        if self._frozen:
+            # Deterministic evaluation in progress: hand the episode outcome to the
+            # evaluator and touch NOTHING else — no rolling buffer, no advancement.
+            # This is the one hook that sees the pre-reset episode state (the shared
+            # episode_state has already been cleared by `reset_episode_state`, which
+            # runs earlier in _reset_idx), hence the caches populated in __call__.
+            if self._eval_sink is not None:
+                self._eval_sink(
+                    env_ids,
+                    succ,
+                    {
+                        "stable_counter": self._last_stable_counter[env_ids],
+                        "fall_after_stand": self._last_fall_after_stand[env_ids],
+                        "first_stable_step": self._last_first_stable_step[env_ids],
+                        "episode_length": self._last_ep_len[env_ids],
+                        "common_step": self._last_common_step,
+                    },
+                )
+        else:
+            self._buffer.extend(1.0 if s else 0.0 for s in succ.tolist())
+
+            # Conservative COUPLED advance: only when the rolling window is FULL and
+            # its success rate clears tau_s. One advance per reset call (never multi-
+            # step in a single batch), then clear the window so the next advance needs
+            # another full K episodes of sustained success.
+            #
+            # DEMOTED when `_autonomous` is False (the deterministic evaluator owns
+            # advancement): the buffer still fills and still backs the
+            # curriculum/fs_success_rate diagnostic, but it moves no levels — the
+            # training rollout is stochastic (a_t ~ N(mu, sigma)) and so measures the
+            # exploration process rather than the policy's competence.
+            if len(self._buffer) >= self._K:
+                rate = sum(self._buffer) / len(self._buffer)
+                self._last_success_rate = rate
+                if self._autonomous and rate >= self._tau:
+                    self.advance()
 
         # Clear any residual applied wrench on the reset envs (mirrors
         # AssistanceCurriculum); __call__ rewrites all envs next step anyway.
