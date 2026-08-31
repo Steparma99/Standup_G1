@@ -86,6 +86,37 @@ def base_height(
     return asset.data.root_link_pos_w[:, 2:3]
 
 
+def estimated_base_height(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Deployable pelvis-height estimate via leg forward kinematics [B, 1].
+
+    Real hardware has no external height sensor, but the vertical offset between
+    the pelvis (root) and a foot IS recoverable on-board from joint encoders plus
+    base orientation alone: it is a pure function of the leg's forward-kinematic
+    chain (hip/knee/ankle angles), rotated into the world vertical by the measured
+    base orientation (IMU roll/pitch) — it does NOT depend on the (unmeasurable)
+    absolute root position, only on relative leg geometry. MuJoCo already computes
+    that same chain from qpos (site_pos_w), so `root_z - foot_z` here is exactly
+    that deployable relative quantity, even though it is read off simulator state.
+
+    Whichever foot is actually planted on the ground gives the TRUE height; a
+    lifted foot sits strictly above ground level, so `root_z - foot_z` for that
+    leg UNDERESTIMATES the true height (foot_z > 0 shrinks the difference). Since
+    no foot goes below ground post-settle, taking the max over both legs recovers
+    the true height whenever at least one foot is planted — true for the large
+    majority of the episode (double support, or single support with the other
+    foot still lifted). Add sensor-realistic noise (~3-5 cm) at the call site;
+    this function itself returns the clean kinematic estimate.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    root_z = asset.data.root_link_pos_w[:, 2:3]  # [B, 1]
+    feet_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, N_feet]
+    est_per_leg = root_z - feet_z  # [B, N_feet]
+    return est_per_leg.max(dim=1, keepdim=True).values  # [B, 1]
+
+
 def body_height(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,

@@ -20,14 +20,20 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             obs_normalization=True,
             distribution_cfg={
                 "class_name": "src.tasks.getup.rl.distribution:ClampedGaussianDistribution",
-                "init_std": 1.5,  # raised 1.0->1.5: wider initial exploration to
-                                  # help discover the stand-up motion (max_std=2.0
-                                  # leaves headroom; adaptive-KL will shrink it).
+                # Sigmoid-parametrised std: sigma = min + (max-min)*sigmoid(p), with p
+                # initialised to the logit of init_std. init_std 1.5 -> 0.3: the old
+                # value was ABOVE max_std=1.0 (the hard clamp silently swallowed it and
+                # started the policy pinned at the upper bound with zero gradient); the
+                # sigmoid parametrisation requires init_std strictly inside the bounds.
+                # 0.3 is a deliberately low, controlled starting exploration level — it
+                # also keeps the incremental action branch's random walk in joint space
+                # bounded (see HybridJointPositionAction).
+                "init_std": 0.3,
                 "std_type": "scalar",
                 "min_std": 0.05,
                 # v28: 2.0 -> 1.0. Policy/mean_std was ratcheting UP (0.93->1.0 and
                 # climbing) on a mature resume — the entropy bonus beating a flat
-                # terminal-phase advantage. Hard-cap the learned std at ~its current
+                # terminal-phase advantage. Cap the learned std at ~its current
                 # value to stop the ratchet, so the final pose (arms/legs) can settle
                 # and post-stand falls drop. Paired with entropy_coef 0.005->0.002.
                 "max_std": 1.0,
@@ -56,7 +62,13 @@ def unitree_g1_getup_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             # v23: post_task 1.6 -> 1.0. The 1.6 bump (v21) existed to amplify the
             # exact-HOME-pose terms (post_home_pose_l2/standing_posture/upper_body_posture),
             # which are now disabled (weight 0). Revert to the pre-plateau balance.
-            reward_group_weights=(2.5, 2.2, 0.1, 1.0),
+            # v29 intent, applied here 2026-08-28: post_task 1.0 -> 1.5. reward_groups.py
+            # had already been moved to 1.5 as the module default, but THIS explicit
+            # tuple overrides it, so the v29 change had never actually reached training.
+            # stable_success_hold and every final-pose term live in the post_task group;
+            # 1.0 left it the lowest-weighted critic group while final-pose/hold was the
+            # metric not improving.
+            reward_group_weights=(2.5, 2.2, 0.1, 1.5),
             # L2C2 smoothness: Lipschitz-continuity penalty on the actor and each critic,
             # added to the loss every update (lambda_actor=1.0, lambda_critic=0.1 per critic).
             l2c2_actor_coef=1.0,

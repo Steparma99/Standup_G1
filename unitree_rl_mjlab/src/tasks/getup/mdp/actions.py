@@ -28,6 +28,9 @@ from mjlab.utils.lab_api.string import resolve_matching_names_values
 from mjlab.utils.string import resolve_expr
 
 from .events import _BETA_RESCALER_ATTR
+# Read-only peek at the last published standing status (see HybridJointPositionAction:
+# the action term must never CALL compute_standing_status, which mutates episode state).
+from .standing import _STATUS_ATTR as _STANDING_STATUS_ATTR
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -39,6 +42,8 @@ __all__ = [
     "LowPassJointPositionActionCfg",
     "IncrementalJointPositionAction",
     "IncrementalJointPositionActionCfg",
+    "HybridJointPositionAction",
+    "HybridJointPositionActionCfg",
 ]
 
 
@@ -383,6 +388,166 @@ class IncrementalJointPositionAction(LowPassJointPositionAction):
         self._backfill_history()
 
 
+class HybridJointPositionAction(IncrementalJointPositionAction):
+    """INCREMENTAL while rising, HOME-anchored ABSOLUTE during the final hold.
+
+        rise mode (w=0):  q^d = q_cur  + beta * s_j * a     velocity-bounded, envelope-free
+        hold mode (w=1):  q^d = q_HOME + beta * a           envelope-bounded around HOME
+
+    and in between the two are linearly blended, q^d = (1-w)*rise + w*hold.
+
+    WHY. The pure absolute scheme ties beta to the reachable ENVELOPE: at beta=0.25
+    every target is confined to q_HOME +- 0.25 rad, which is smaller than the
+    reset->HOME delta on hip_pitch (0.312 rad) and far smaller than on the knee
+    (0.669 rad) — the knee target could never be commanded below 0.419 rad, so the
+    late curriculum was structurally unable to command the pose the robot starts
+    from. The pure incremental scheme fixes that (beta bounds per-step SPEED, not
+    reach) but leaves the final pose unanchored and lets the policy random-walk in
+    joint space. Blending gives each phase the bound that actually helps it:
+    unconstrained reach while getting up, a tight envelope around HOME once
+    standing — without any hand-authored anchor schedule.
+
+    MODE SWITCH (hysteretic, per env, latched with separate enter/exit streaks):
+    enter hold after `hold_enter_steps` consecutive stable steps, leave it after
+    `hold_exit_steps` consecutive non-stable steps, so a stumble hands full
+    incremental authority back for the recovery instead of trapping the robot
+    inside the HOME envelope. Forced off during the settle window.
+
+    The switch reads the LAST PUBLISHED standing status read-only and never calls
+    compute_standing_status(): that function is memoised on common_step_counter AND
+    mutates episode state (counters, latches). Calling it here — process_actions runs
+    BEFORE the physics step — would advance those counters on pre-step data and hand
+    the rewards a stale cache. A one-step-old mode signal is harmless for a switch.
+
+    Target processing: no EMA (`alpha` is ignored, as in the incremental parent — the
+    increment already bounds rise-phase motion and an EMA would drag the incremental
+    branch toward the previous COMMAND rather than the measured pose). The slew-rate
+    limit (`max_rate`) IS active here and is a real operational bound, not just the
+    parent's emergency clamp: it is the hard safety net on the mode transition. Keep
+    it above beta*s_j/step_dt so it never binds during a nominal rise.
+    """
+
+    cfg: "HybridJointPositionActionCfg"
+
+    def __init__(self, cfg: "HybridJointPositionActionCfg", env: "ManagerBasedRlEnv"):
+        super().__init__(cfg, env)
+        self._hold_enter_steps = int(cfg.hold_enter_steps)
+        self._hold_exit_steps = int(cfg.hold_exit_steps)
+        self._mode_blend_steps = max(int(cfg.mode_blend_steps), 1)
+        # Per-env mode latch, non-stable streak, and the blended weight [0,1].
+        self._hold_mode = torch.zeros(env.num_envs, device=self.device, dtype=torch.bool)
+        self._unstable_counter = torch.zeros(
+            env.num_envs, device=self.device, dtype=torch.long
+        )
+        self._hold_weight = torch.zeros(env.num_envs, 1, device=self.device)
+
+    @property
+    def hold_weight(self) -> torch.Tensor:
+        """Blend weight w: 0 = pure incremental rise, 1 = pure HOME-anchored hold [B, 1]."""
+        return self._hold_weight
+
+    @property
+    def hold_mode(self) -> torch.Tensor:
+        """Per-env hold-mode latch (the blend TARGET, before ramping) [B]."""
+        return self._hold_mode
+
+    def _update_hold_weight(self) -> torch.Tensor:
+        """Advance the hysteretic mode latch and ramp the blend weight. Returns [B, 1]."""
+        status = getattr(self._env, _STANDING_STATUS_ATTR, None)
+        if status is not None:
+            stable_now = status["stable_now"]
+            stable_ctr = status["stable_counter"]
+            self._unstable_counter = torch.where(
+                stable_now,
+                torch.zeros_like(self._unstable_counter),
+                self._unstable_counter + 1,
+            )
+            enter = stable_ctr >= self._hold_enter_steps
+            leave = self._unstable_counter >= self._hold_exit_steps
+            self._hold_mode = (self._hold_mode | enter) & ~leave
+
+        # The policy does not control during settle: never hold-anchor there.
+        if self._settle_steps > 0:
+            self._hold_mode &= ~(self._env.episode_length_buf < self._settle_steps)
+
+        target_w = self._hold_mode.float().unsqueeze(-1)  # [B, 1]
+        max_step = 1.0 / self._mode_blend_steps
+        self._hold_weight = self._hold_weight + torch.clamp(
+            target_w - self._hold_weight, -max_step, max_step
+        )
+        return self._hold_weight
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        self._raw_policy_actions = actions.clone()
+        a = torch.clamp(actions, -1.0, 1.0)
+        self._clipped_raw_actions = a
+
+        beta = self._read_beta()  # [B,1] or scalar 1.0
+        q_cur = self._entity.data.joint_pos[:, self._target_ids]  # [B, A] measured
+
+        # Action ramp: fade the increment in linearly after the settle window.
+        if self._settle_steps > 0 or self._action_ramp_steps > 1:
+            steps_since_settle = (
+                self._env.episode_length_buf - self._settle_steps
+            ).clamp(min=0)
+            ramp = (
+                steps_since_settle.float() / self._action_ramp_steps
+            ).clamp(0.0, 1.0).unsqueeze(-1)
+        else:
+            ramp = 1.0
+
+        increment = beta * self._delta_scale * a * ramp  # [B, A]
+        self._scaled_increment = increment
+        rise_target = q_cur + increment
+        hold_target = self._default_target + beta * a
+
+        w = self._update_hold_weight()  # [B, 1]
+        desired_target = (1.0 - w) * rise_target + w * hold_target
+
+        # Slew-rate limit against the previous realizable command: the hard bound on
+        # the mode transition (the blend ramp is the soft one). Falls back to the
+        # emergency clamp when max_rate is unset.
+        max_delta = (
+            self._emergency_delta
+            if self._max_target_delta is None
+            else self._max_target_delta
+        )
+        delta = torch.clamp(
+            desired_target - self._filtered_target, -max_delta, max_delta
+        )
+        desired_target = self._filtered_target + delta
+
+        self._filtered_target_unclamped = desired_target
+        self._processed_actions = self._clamp_to_joint_limits(desired_target)
+        self._filtered_target = self._processed_actions.clone()
+
+        # --- settling phase: hold at current measured pose, policy ignored ---
+        if self._settle_steps > 0:
+            in_settle = self._env.episode_length_buf < self._settle_steps
+            if bool(in_settle.any()):
+                hold = self._entity.data.joint_pos[:, self._target_ids]
+                mask = in_settle.unsqueeze(-1)
+                self._processed_actions = torch.where(mask, hold, self._processed_actions)
+                self._filtered_target = torch.where(mask, hold, self._filtered_target)
+                self._filtered_target_unclamped = torch.where(
+                    mask, hold, self._filtered_target_unclamped)
+                self._scaled_increment = torch.where(
+                    mask, torch.zeros_like(self._scaled_increment), self._scaled_increment)
+        self._backfill_history()
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        super().reset(env_ids)
+        # Every episode starts on the floor: pure incremental, no hold anchoring.
+        if env_ids is None:
+            self._hold_mode[:] = False
+            self._unstable_counter[:] = 0
+            self._hold_weight[:] = 0.0
+        else:
+            self._hold_mode[env_ids] = False
+            self._unstable_counter[env_ids] = 0
+            self._hold_weight[env_ids] = 0.0
+
+
 class HandHoldAction(ActionTerm):
     """Zero-action-dim term that PD-holds a joint group at a fixed target pose.
 
@@ -546,3 +711,30 @@ class IncrementalJointPositionActionCfg(LowPassJointPositionActionCfg):
 
     def build(self, env: "ManagerBasedRlEnv") -> "IncrementalJointPositionAction":
         return IncrementalJointPositionAction(self, env)
+
+
+@dataclass(kw_only=True)
+class HybridJointPositionActionCfg(IncrementalJointPositionActionCfg):
+    """Configuration for HybridJointPositionAction.
+
+    Inherits the incremental fields (delta_scale / default_delta_scale /
+    action_ramp_steps / emergency_rate_limit_rad_s) and the HOME anchor
+    (`default_pos_override`) — the hybrid term needs BOTH. `alpha` and the
+    liftoff_* fields are IGNORED (no EMA); `max_rate` IS honoured."""
+
+    hold_enter_steps: int = 25
+    """Consecutive stable steps (chi_t, from the shared standing status) before an env
+    latches into HOME-anchored hold mode. At 50 Hz, 25 steps = 0.5 s — long enough not
+    to trip on a transient, short enough to anchor well before the hold reward window."""
+
+    hold_exit_steps: int = 10
+    """Consecutive NON-stable steps before an env drops back to incremental mode. Short
+    on purpose: a stumbling robot needs its full reach back immediately to recover."""
+
+    mode_blend_steps: int = 25
+    """Env-steps for the linear blend between the two schemes on a mode change. The
+    blend — not the slew limit — is the primary smoother: switching instantly could
+    jump the target by the full q_cur-to-HOME distance in a single step."""
+
+    def build(self, env: "ManagerBasedRlEnv") -> "HybridJointPositionAction":
+        return HybridJointPositionAction(self, env)

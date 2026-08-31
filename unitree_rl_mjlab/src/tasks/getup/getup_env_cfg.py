@@ -24,9 +24,17 @@ import src.tasks.getup.mdp as mdp
 
 _ACTOR_INCLUDE_BODY_HEIGHT = False
 _ACTOR_INCLUDE_FEET_CONTACT = False
-# HoST's deployable state vector does NOT include the accelerometer; it is kept on
-# the CRITIC only (clean ground truth, see _get_privileged_critic_obs_terms).
-_ACTOR_INCLUDE_IMU_LIN_ACC = False
+# HoST's deployable state vector did not include the accelerometer, but the real
+# G1 IMU (pelvis, 6-axis) exposes the accelerometer directly on the SDK's
+# low_state (imu_state().accelerometer()) on every model, so it IS deployable.
+# Enabled: the actor gets the noisy/biased/delayed model (mdp.ImuLinAcc); the
+# critic keeps the clean ground truth (see _get_privileged_critic_obs_terms).
+_ACTOR_INCLUDE_IMU_LIN_ACC = True
+# Real hardware has no external height sensor, but the pelvis-to-foot vertical
+# offset is recoverable from leg forward kinematics (joint encoders) + base
+# orientation alone — see mdp.estimated_base_height. Deployable proxy for the
+# ground-truth `base_height` (which stays actor-forbidden).
+_ACTOR_INCLUDE_ESTIMATED_HEIGHT = True
 
 # --- Pre-normalization clip bounds (protect the empirical normalizer from
 # outliers / sim blow-ups). Applied at the term level, BEFORE the network's
@@ -150,6 +158,17 @@ def _get_actor_obs_terms() -> dict[str, ObservationTermCfg]:
         actor_terms["feet_contact"] = ObservationTermCfg(
             func=mdp.feet_contact,
             params={"sensor_name": "feet_ground_contact"},
+        )
+    if _ACTOR_INCLUDE_ESTIMATED_HEIGHT:
+        # Deployable leg-FK height proxy (see mdp.estimated_base_height). Noise
+        # ±0.04 m models the ~3-5 cm error of a real encoder-based FK estimate
+        # (link-length tolerance, joint-angle offset error, foot-not-quite-flat
+        # contact assumption) — distinct from and much noisier than the ground
+        # truth `base_height`, which stays actor-forbidden.
+        actor_terms["estimated_height"] = ObservationTermCfg(
+            func=mdp.estimated_base_height,
+            params={"asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))},
+            noise=Unoise(n_min=-0.04, n_max=0.04),
         )
 
     return actor_terms
@@ -1473,20 +1492,21 @@ def make_getup_env_cfg() -> ManagerBasedRlEnvCfg:
                 # HoST sim fidelity: 200 Hz PD / physics, policy at 50 Hz
                 # (decimation=4 below). For deployment this switches to 500 Hz PD /
                 # 50 Hz policy (decimation=10). Larger timestep makes the contact
-                # problem stiffer per step, so the solver iterations are kept high
-                # (50 / 30) rather than reduced.
+                # problem stiffer per step, so the solver iterations are kept at
+                # the mjlab defaults rather than reduced.
                 timestep=0.005,  # 200 Hz physics
-                # Newton solver convergence. The previous (10 / 20) were aggressive
-                # cuts from the mjlab defaults (100 / 50) made for CPU dev speed.
-                # Get-up is CONTACT-DOMINATED (whole body on the floor) and those
-                # contact forces directly feed the reward/termination signals
-                # (head/feet/knee/torso/hand forces). Under-resolved contacts give
-                # penetration + noisy forces → the policy learns on bad physics and
-                # may not transfer (sim2real). For the GPU run we trade some
-                # throughput for contact fidelity: 50 / 30 (still half the default
-                # iterations). Lower to 30 / 20 if GPU throughput is too low.
-                iterations=50,
-                ls_iterations=30,
+                # Newton solver convergence, kept at the mjlab defaults (100 / 50).
+                # Get-up is CONTACT-DOMINATED (whole body on the floor, dense/
+                # ill-conditioned constraint graph) and those contact forces
+                # directly feed the reward/termination signals (head/feet/knee/
+                # torso/hand forces). Under-resolved contacts give penetration +
+                # noisy forces → the policy learns on bad physics and may not
+                # transfer (sim2real). Once standing, only ~2 contacts are active
+                # and the solver converges in a few iterations well under this
+                # cap, so the cost of the higher cap is paid mostly during the
+                # rise phase where it matters. Lower if GPU throughput requires it.
+                iterations=100,
+                ls_iterations=50,
             ),
         ),
         decimation=4,  # control at 50Hz (0.005 * 4 = 0.02s) — HoST policy rate

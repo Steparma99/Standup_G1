@@ -1,10 +1,13 @@
 """Unitree G1 get-up environment configuration."""
 
 import os
+from dataclasses import dataclass
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
+from src.tasks.getup.curriculum_cfg import ActionProcessingCfg
 from src.tasks.getup.mdp.actions import (
+    HybridJointPositionActionCfg,
     HandHoldActionCfg,
     LowPassJointPositionActionCfg,
 )
@@ -229,6 +232,14 @@ _RESET_FALL_HEIGHT = 0.03
 # length — investigate there instead of raising this further.
 _SETTLE_STEPS = 60
 _MASK_STEPS = 10
+# Effective usable budget: episode_length_s=10.0 @ 50 Hz = 500 steps total, minus
+# _SETTLE_STEPS(60) unactuated = 440 steps = 8.8 s in which the policy actually
+# controls the rise+hold. With the liftoff phase DISABLED for the active hybrid
+# action term (see joint_pos_action.liftoff_steps = 0 below), none of that 440 is
+# reserved for a liftoff/ramp overhead any more (previously _LIFTOFF_STEPS(30) +
+# _LIFTOFF_RAMP_STEPS(20) = 50 steps / 1.0 s of the absolute-scheme liftoff sat
+# inside this window) — the full 440 steps / 8.8 s are free budget for the rise
+# (typically 3-6 s), i.e. more margin than under the old liftoff-active scheme.
 
 # ---------------------------------------------------------------------------
 # Liftoff phase (v18b): for the first _LIFTOFF_STEPS right after the settle window
@@ -239,6 +250,10 @@ _MASK_STEPS = 10
 # _LIFTOFF_RAMP_STEPS (a hard step back would itself be a jerk seam). Permanent
 # structural behavior (part of the trained dynamics), not a training curriculum.
 # alpha time constant at 50 Hz: nominal 0.12 -> ~156 ms; liftoff 0.06 -> ~330 ms.
+# NOTE: this whole mechanism (_LIFTOFF_STEPS/_LIFTOFF_ALPHA/_LIFTOFF_MAX_RATE/
+# _LIFTOFF_RAMP_STEPS) is DEAD for the currently active HybridJointPositionAction —
+# joint_pos_action.liftoff_steps is forced to 0 below (see the HYBRID comment near
+# that assignment). It only still applies to the legacy absolute-only action term.
 # ---------------------------------------------------------------------------
 _LIFTOFF_STEPS      = 30    # 0.6 s of slow, deliberate initial rise
 _LIFTOFF_ALPHA      = 0.06  # half the nominal 0.12
@@ -247,8 +262,119 @@ _LIFTOFF_MAX_RATE   = 1.25  # rad/s, half the nominal 2.5 — still enough autho
 _LIFTOFF_RAMP_STEPS = 20    # 0.4 s linear blend back to nominal values
 
 
+# ---------------------------------------------------------------------------
+# Environment-variable override registry — SINGLE declarative source of truth
+# for every GETUP_* env var this task reads. Before this, each override was
+# only visible via an ad-hoc print() scattered next to its usage (or, for the
+# liftoff/alpha/freeze vars, not printed at all unless set) — a leftover
+# export from a previous shell session could silently change a run with
+# nothing in the log to flag it. _log_env_var_overrides() prints ONE
+# consolidated block at the very start of unitree_g1_getup_env_cfg() instead,
+# so every override — or every stale var that is read but has NO EFFECT — is
+# visible up front, with a WARNING on anything that diverges from its coded
+# default. `active=False` entries are knobs that used to work but are now
+# dead code paths (e.g. the Hybrid action term ignores alpha entirely); they
+# are still checked so an old GETUP_ACTION_ALPHA export doesn't look inert.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _EnvVarSpec:
+    name: str
+    default: float | None  # None: no numeric default — any set value is flagged
+    effect: str            # one-line description of what the var does when active
+    active: bool = True    # False = read elsewhere but currently has NO EFFECT
+
+
+_ENV_VAR_REGISTRY: tuple[_EnvVarSpec, ...] = (
+    _EnvVarSpec(
+        "GETUP_ACTION_MAX_RATE", 3.0,
+        "slew-rate limit (rad/s) on the Hybrid action term's commanded target",
+    ),
+    _EnvVarSpec(
+        "GETUP_ANTI_JUMP_RAMP_FROM", 0.45,
+        "height (m) above which anti_jump_velocity's gate activates",
+    ),
+    _EnvVarSpec(
+        "GETUP_TRAIN_INITIAL_ASSIST_FORCE", _ASSIST_INITIAL_FORCE_N,
+        "starting N of the assist-force curriculum (decay/ramp stay live)",
+    ),
+    _EnvVarSpec(
+        "GETUP_TRAIN_INITIAL_BETA", _BETA_INITIAL,
+        "starting value of the beta action-rescaler curriculum",
+    ),
+    _EnvVarSpec(
+        "GETUP_EVAL_ASSIST_FORCE", 0.0,
+        "constant assist force (N) pinned at eval/play time only (no effect in train mode)",
+    ),
+    _EnvVarSpec(
+        "GETUP_ACTION_ALPHA", None,
+        "EMA alpha override — DEAD: HybridJointPositionAction ignores alpha entirely",
+        active=False,
+    ),
+    _EnvVarSpec(
+        "GETUP_ACTION_LIFTOFF_STEPS", None,
+        "liftoff-phase step count — DEAD: liftoff phase disabled under Hybrid",
+        active=False,
+    ),
+    _EnvVarSpec(
+        "GETUP_ACTION_LIFTOFF_ALPHA", None,
+        "liftoff-phase alpha override — DEAD: liftoff phase disabled under Hybrid",
+        active=False,
+    ),
+    _EnvVarSpec(
+        "GETUP_ACTION_LIFTOFF_MAX_RATE", None,
+        "liftoff-phase slew rate override — DEAD: liftoff phase disabled under Hybrid",
+        active=False,
+    ),
+    _EnvVarSpec(
+        "GETUP_TRAIN_FREEZE_BETA", None,
+        "beta-anneal freeze flag — DEAD: freeze support removed in v20, beta always anneals",
+        active=False,
+    ),
+)
+
+
+def _log_env_var_overrides() -> None:
+    """Print one consolidated block listing every GETUP_* env var read by this
+    task, its actual value, and a visible WARNING for anything that diverges
+    from its coded default or is set but has no effect. Call once at the top
+    of unitree_g1_getup_env_cfg() so overrides are never only discoverable by
+    reading source comments."""
+    set_specs = [
+        spec for spec in _ENV_VAR_REGISTRY
+        if os.environ.get(spec.name) not in (None, "")
+    ]
+    print("=" * 78)
+    print(
+        "[getup] env-var override check "
+        f"({len(set_specs)}/{len(_ENV_VAR_REGISTRY)} GETUP_* vars set)"
+    )
+    if not set_specs:
+        print("[getup]   none set — all task knobs at their coded defaults")
+    for spec in set_specs:
+        raw = os.environ[spec.name]
+        if not spec.active:
+            print(f"[getup]   WARNING {spec.name}={raw!r} is SET but IGNORED — {spec.effect}")
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            print(
+                f"[getup]   WARNING {spec.name}={raw!r} could not be parsed as a "
+                f"float — {spec.effect}"
+            )
+            continue
+        diverges = spec.default is None or value != spec.default
+        tag = "WARNING" if diverges else "note   "
+        default_repr = "n/a" if spec.default is None else f"{spec.default:g}"
+        print(
+            f"[getup]   {tag} {spec.name}={value:g} (default {default_repr}) — {spec.effect}"
+        )
+    print("=" * 78)
+
+
 def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create Unitree G1 29-DOF get-up task configuration."""
+    _log_env_var_overrides()
     cfg = make_getup_env_cfg()
 
     cfg.sim.mujoco.ccd_iterations = 500
@@ -475,14 +601,34 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         contact_hand_right_cfg,
     )
 
-    # HoST action scaling: p^d = q_default + beta * a, with a single scalar action
-    # scale of 1.0 (the per-env beta curriculum supplies the actual rescaling,
-    # 1.0 -> 0.25). This REPLACES the previous per-joint G1_ACTION_SCALE
-    # (0.25*effort/stiffness); with beta=1.0 the residual is up to ±1 rad/joint, so
-    # actions are more aggressive early and anneal down as each env succeeds.
-    joint_pos_action = cfg.actions["joint_pos"]
-    assert isinstance(joint_pos_action, LowPassJointPositionActionCfg)
-    joint_pos_action.scale = 1.0
+    # HYBRID action semantics (2026-08-28). Was: pure HoST absolute,
+    # p^d = q_HOME + beta*a with scale 1.0. That scheme ties beta to the reachable
+    # ENVELOPE, and the numbers do not work at the end of the curriculum: at
+    # beta=0.25 every target is confined to q_HOME ± 0.25 rad, while the reset->HOME
+    # delta is 0.312 rad on hip_pitch and 0.669 rad on the knee. The knee target
+    # could never be commanded below 0.419 rad — i.e. the policy structurally could
+    # not command the pose it starts the episode in.
+    #
+    # The hybrid term separates SPEED from ENVELOPE instead of conflating them:
+    #   rising  -> q^d = q_cur  + beta*s_j*a   (beta bounds per-step speed; reach free)
+    #   holding -> q^d = q_HOME + beta*a       (beta bounds the envelope around HOME)
+    # blended over mode_blend_steps on a hysteretic stable/not-stable switch, so no
+    # manual anchor schedule is needed. See HybridJointPositionAction for the full
+    # rationale and for why the switch only READS the standing status.
+    _old_joint_pos_action = cfg.actions["joint_pos"]
+    assert isinstance(_old_joint_pos_action, LowPassJointPositionActionCfg)
+    _act = ActionProcessingCfg()  # single source of truth for the per-joint s_j
+    joint_pos_action = HybridJointPositionActionCfg(
+        entity_name=_old_joint_pos_action.entity_name,
+        actuator_names=_old_joint_pos_action.actuator_names,
+        scale=1.0,  # absolute branch: residual is beta*a directly
+        use_default_offset=False,
+        delta_scale=dict(_act.delta_scale),
+        default_delta_scale=_act.default_delta_scale,
+        action_ramp_steps=_act.action_ramp_steps,
+        emergency_rate_limit_rad_s=_act.emergency_rate_limit_rad_s,
+    )
+    cfg.actions["joint_pos"] = joint_pos_action
     # Motion-smoothness governor (distinct from beta). alpha is the EMA weight on
     # the freshly commanded PD target: q_cmd_t = alpha*desired + (1-alpha)*q_cmd_{t-1}.
     # It controls how FAST the target moves, whereas beta controls how FAR the
@@ -503,12 +649,15 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # asked for above) and the rise is STILL faster than wanted; liftoff-phase
     # values (_LIFTOFF_ALPHA/_LIFTOFF_MAX_RATE) untouched — the early rise was
     # judged good in v18b, this slows the mid/late rise only.
-    joint_pos_action.alpha = 0.10
-    _override_alpha = os.environ.get("GETUP_ACTION_ALPHA")
-    if _override_alpha not in (None, ""):
-        joint_pos_action.alpha = float(_override_alpha)
-        print(f"[getup] action low-pass alpha overridden to {joint_pos_action.alpha:.3f} "
-              "(GETUP_ACTION_ALPHA)")
+    # HYBRID: alpha is INERT. The rise branch is already speed-bounded by beta*s_j per
+    # step, and an EMA would drag it toward the previous COMMAND rather than the
+    # measured pose (the increment is defined relative to q_cur). Smoothness in the
+    # rise now comes from s_j, and in the hold transition from mode_blend_steps.
+    # Kept at 1.0 (= filter off). The historical tuning trail (0.5 -> 0.25 -> 0.15 ->
+    # 0.12 -> 0.10) applied to the absolute-only scheme and no longer governs.
+    joint_pos_action.alpha = 1.0
+    # (GETUP_ACTION_ALPHA is read/flagged by _log_env_var_overrides() above — dead
+    # under Hybrid, see the registry entry.)
     # Slew-rate limit (rad/s) on the commanded target — bounds ABSOLUTE motion speed,
     # which alpha (a fraction-of-distance EMA) structurally cannot: the biggest joint
     # travel early in the rise stays fast even at low alpha, and anti_jump_velocity
@@ -524,34 +673,29 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # slew cap is what bounds the big early-travel joints that alpha (fraction-
     # of-distance EMA) structurally cannot slow. Revert to 2.5 first if the
     # robot can no longer catch itself during the rise.
-    joint_pos_action.max_rate = 2.0
+    # HYBRID: 2.0 -> 3.0 rad/s. The slew is now a SAFETY NET / hold-transition backstop,
+    # not the primary smoother — the nominal rise-phase speed bound is beta*s_j, which
+    # at beta=1.0 peaks at 0.05 rad/step = 2.5 rad/s (shoulders/elbows; legs 2.0 rad/s).
+    # Leaving the cap at 2.0 would have made the slew bind during a NOMINAL rise and
+    # silently throttle the incremental branch it is supposed to leave alone. 3.0 sits
+    # just above that peak, so it only engages on a genuine anomaly or a mode switch.
+    joint_pos_action.max_rate = 3.0
     _override_max_rate = os.environ.get("GETUP_ACTION_MAX_RATE")
     if _override_max_rate not in (None, ""):
         joint_pos_action.max_rate = float(_override_max_rate)
-        print(f"[getup] action slew-rate limit overridden to {joint_pos_action.max_rate:.3f} rad/s "
-              "(GETUP_ACTION_MAX_RATE)")
+    # (GETUP_ACTION_MAX_RATE's actual value is reported by _log_env_var_overrides().)
     # Liftoff phase (v18b): slower alpha/slew for the first _LIFTOFF_STEPS after the
     # settle window, blending back to nominal over _LIFTOFF_RAMP_STEPS. See the
     # _LIFTOFF_* constants above for rationale/values.
-    joint_pos_action.liftoff_steps = _LIFTOFF_STEPS
-    joint_pos_action.liftoff_alpha = _LIFTOFF_ALPHA
-    joint_pos_action.liftoff_max_rate = _LIFTOFF_MAX_RATE
-    joint_pos_action.liftoff_ramp_steps = _LIFTOFF_RAMP_STEPS
-    _override_liftoff_steps = os.environ.get("GETUP_ACTION_LIFTOFF_STEPS")
-    if _override_liftoff_steps not in (None, ""):
-        joint_pos_action.liftoff_steps = int(_override_liftoff_steps)
-        print(f"[getup] liftoff steps overridden to {joint_pos_action.liftoff_steps} "
-              "(GETUP_ACTION_LIFTOFF_STEPS; 0 disables the liftoff phase)")
-    _override_liftoff_alpha = os.environ.get("GETUP_ACTION_LIFTOFF_ALPHA")
-    if _override_liftoff_alpha not in (None, ""):
-        joint_pos_action.liftoff_alpha = float(_override_liftoff_alpha)
-        print(f"[getup] liftoff alpha overridden to {joint_pos_action.liftoff_alpha:.3f} "
-              "(GETUP_ACTION_LIFTOFF_ALPHA)")
-    _override_liftoff_max_rate = os.environ.get("GETUP_ACTION_LIFTOFF_MAX_RATE")
-    if _override_liftoff_max_rate not in (None, ""):
-        joint_pos_action.liftoff_max_rate = float(_override_liftoff_max_rate)
-        print(f"[getup] liftoff slew-rate overridden to {joint_pos_action.liftoff_max_rate:.3f} rad/s "
-              "(GETUP_ACTION_LIFTOFF_MAX_RATE)")
+    # HYBRID: the liftoff phase is DISABLED. It existed to slow the early rise of the
+    # absolute scheme, whose EMA moved a fraction-of-distance and was therefore fastest
+    # exactly when the target was farthest (right at liftoff). The incremental branch
+    # has no such distance dependence — its step is beta*s_j regardless of how far HOME
+    # is — so the problem it solved no longer exists, and its alpha/slew overrides would
+    # now only throttle the increment. action_ramp_steps fades the increment in instead.
+    joint_pos_action.liftoff_steps = 0
+    # (GETUP_ACTION_LIFTOFF_STEPS/ALPHA/MAX_RATE are read/flagged by
+    # _log_env_var_overrides() above — dead under Hybrid, see the registry.)
     # v10 beta-anchor fix: anchor the residual/beta scheme on the standing HOME
     # pose, NOT the entity's spawn default (= SUPINE, lying on the back). The
     # entity must keep spawning supine, but mjlab derives default_joint_pos from
@@ -883,13 +1027,16 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     _anti_jump_ramp_from = os.environ.get("GETUP_ANTI_JUMP_RAMP_FROM")
     if _anti_jump_ramp_from not in (None, ""):
         cfg.rewards["anti_jump_velocity"].params["ramp_from"] = float(_anti_jump_ramp_from)
-        print(f"[getup] anti_jump_velocity ramp_from overridden to "
-              f"{float(_anti_jump_ramp_from):.3f} (GETUP_ANTI_JUMP_RAMP_FROM)")
+    # (GETUP_ANTI_JUMP_RAMP_FROM's actual value is reported by _log_env_var_overrides().)
 
     # Domain randomization: mass offset on torso, friction on feet.
     cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
+    # mode="reset" (not "startup"): resample foot friction every episode rather than
+    # once at env creation, so the critic sees friction variation correlated with the
+    # SAME states across episodes (better value estimation under friction uncertainty)
+    # instead of each parallel env being permanently pinned to one friction sample.
     cfg.events["foot_friction"] = EventTermCfg(
-        mode="startup",
+        mode="reset",
         func=dr.geom_friction,
         params={
             "asset_cfg": SceneEntityCfg("robot", geom_names=geom_names),
@@ -927,9 +1074,8 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         _initial_force_n = (
             float(_train_force) if _train_force not in (None, "") else _ASSIST_INITIAL_FORCE_N
         )
-        if _train_force not in (None, ""):
-            print(f"[getup] TRAIN assist force curriculum starting at {_initial_force_n:.1f} N "
-                  "(GETUP_TRAIN_INITIAL_ASSIST_FORCE override, continues decaying normally)")
+        # (GETUP_TRAIN_INITIAL_ASSIST_FORCE's actual value is reported by
+        # _log_env_var_overrides().)
         cfg.events["assistance_curriculum"] = EventTermCfg(
             mode="step",
             func=AssistanceCurriculum,
@@ -981,12 +1127,8 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         # ALWAYS anneals (decay/ramp/breaker live); a stationary-beta reconverge,
         # if ever needed again, must be a deliberate code change, not an env var.
         # The eval-side --eval-beta pin is unaffected (separate code path).
-        if os.environ.get("GETUP_TRAIN_FREEZE_BETA") not in (None, ""):
-            print("[getup] WARNING: GETUP_TRAIN_FREEZE_BETA is set but IGNORED "
-                  "(freeze support removed in v20 — beta always anneals in training)")
-        if _train_beta not in (None, ""):
-            print(f"[getup] TRAIN beta curriculum starting at {_initial_beta:.3f} "
-                  "(GETUP_TRAIN_INITIAL_BETA override)")
+        # (GETUP_TRAIN_FREEZE_BETA and GETUP_TRAIN_INITIAL_BETA are read/flagged by
+        # _log_env_var_overrides() above.)
         if _BETA_FREEZE:
             print(f"[getup] beta curriculum FROZEN at {_initial_beta:.3f} "
                   "(_BETA_FREEZE=True — no auto decay/ramp/breaker; step down "
@@ -1083,7 +1225,7 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=dr.sync_actuator_delays,
             params={
                 "asset_cfg": SceneEntityCfg("robot"),
-                "lag_range": (0, 3),  # physics steps; 0 = no delay, 3 = 3*2ms = 6ms
+                "lag_range": (0, 3),  # physics steps @ 200 Hz (5 ms/step); 0-3 -> 0-15 ms
             },
         )
 
