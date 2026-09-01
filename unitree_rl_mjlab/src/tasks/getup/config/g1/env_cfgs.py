@@ -5,9 +5,7 @@ from dataclasses import dataclass
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
-from src.tasks.getup.curriculum_cfg import ActionProcessingCfg
 from src.tasks.getup.mdp.actions import (
-    HybridJointPositionActionCfg,
     HandHoldActionCfg,
     LowPassJointPositionActionCfg,
 )
@@ -601,34 +599,38 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         contact_hand_right_cfg,
     )
 
-    # HYBRID action semantics (2026-08-28). Was: pure HoST absolute,
-    # p^d = q_HOME + beta*a with scale 1.0. That scheme ties beta to the reachable
-    # ENVELOPE, and the numbers do not work at the end of the curriculum: at
-    # beta=0.25 every target is confined to q_HOME ± 0.25 rad, while the reset->HOME
-    # delta is 0.312 rad on hip_pitch and 0.669 rad on the knee. The knee target
-    # could never be commanded below 0.419 rad — i.e. the policy structurally could
-    # not command the pose it starts the episode in.
+    # REVERTED 2026-09-01: HYBRID action semantics (introduced 2026-08-31, M4)
+    # regressed a from-scratch 14000-it run to zero successful stands (assist
+    # force + beta both pinned at their initial values the ENTIRE run, vs the
+    # prior LowPass-absolute run (v33_fresh, 2026-08-28) which stood up from
+    # it~1000 onward under the identical frozen-beta legacy curriculum). Root
+    # cause hypothesis: the incremental rise branch (q^d = q_cur + beta*s_j*a)
+    # makes net joint displacement over an episode a random walk under
+    # uncorrelated per-step noise — diffusive (~sqrt(T)) instead of the
+    # absolute scheme's direct target-sampling, which lets even an untrained
+    # policy occasionally land targets near the standing pose and get an early
+    # reward gradient. Reverting to the pre-M4 absolute/EMA scheme (kept
+    # working for v9->v33) to confirm before retuning Hybrid. The original
+    # rationale for Hybrid (beta=0.25 knee-envelope wall, see below) is still
+    # valid and worth revisiting once this is confirmed by a clean rerun — it
+    # was never actually exercised in that regime here since beta is frozen at
+    # 1.0 for this task, so the envelope-wall problem does not currently bite.
     #
-    # The hybrid term separates SPEED from ENVELOPE instead of conflating them:
+    # Original HYBRID rationale (kept for reference, code currently NOT active):
+    # was pure HoST absolute, p^d = q_HOME + beta*a with scale 1.0. That scheme
+    # ties beta to the reachable ENVELOPE, and the numbers do not work at the
+    # end of the curriculum: at beta=0.25 every target is confined to
+    # q_HOME ± 0.25 rad, while the reset->HOME delta is 0.312 rad on hip_pitch
+    # and 0.669 rad on the knee. The knee target could never be commanded below
+    # 0.419 rad — i.e. the policy structurally could not command the pose it
+    # starts the episode in. The hybrid term separates SPEED from ENVELOPE:
     #   rising  -> q^d = q_cur  + beta*s_j*a   (beta bounds per-step speed; reach free)
     #   holding -> q^d = q_HOME + beta*a       (beta bounds the envelope around HOME)
-    # blended over mode_blend_steps on a hysteretic stable/not-stable switch, so no
-    # manual anchor schedule is needed. See HybridJointPositionAction for the full
-    # rationale and for why the switch only READS the standing status.
-    _old_joint_pos_action = cfg.actions["joint_pos"]
-    assert isinstance(_old_joint_pos_action, LowPassJointPositionActionCfg)
-    _act = ActionProcessingCfg()  # single source of truth for the per-joint s_j
-    joint_pos_action = HybridJointPositionActionCfg(
-        entity_name=_old_joint_pos_action.entity_name,
-        actuator_names=_old_joint_pos_action.actuator_names,
-        scale=1.0,  # absolute branch: residual is beta*a directly
-        use_default_offset=False,
-        delta_scale=dict(_act.delta_scale),
-        default_delta_scale=_act.default_delta_scale,
-        action_ramp_steps=_act.action_ramp_steps,
-        emergency_rate_limit_rad_s=_act.emergency_rate_limit_rad_s,
-    )
-    cfg.actions["joint_pos"] = joint_pos_action
+    # See HybridJointPositionAction (mdp/actions.py) for the full class, kept
+    # in place and importable for a future retry.
+    joint_pos_action = cfg.actions["joint_pos"]
+    assert isinstance(joint_pos_action, LowPassJointPositionActionCfg)
+    joint_pos_action.scale = 1.0
     # Motion-smoothness governor (distinct from beta). alpha is the EMA weight on
     # the freshly commanded PD target: q_cmd_t = alpha*desired + (1-alpha)*q_cmd_{t-1}.
     # It controls how FAST the target moves, whereas beta controls how FAR the
@@ -649,15 +651,13 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # asked for above) and the rise is STILL faster than wanted; liftoff-phase
     # values (_LIFTOFF_ALPHA/_LIFTOFF_MAX_RATE) untouched — the early rise was
     # judged good in v18b, this slows the mid/late rise only.
-    # HYBRID: alpha is INERT. The rise branch is already speed-bounded by beta*s_j per
-    # step, and an EMA would drag it toward the previous COMMAND rather than the
-    # measured pose (the increment is defined relative to q_cur). Smoothness in the
-    # rise now comes from s_j, and in the hold transition from mode_blend_steps.
-    # Kept at 1.0 (= filter off). The historical tuning trail (0.5 -> 0.25 -> 0.15 ->
-    # 0.12 -> 0.10) applied to the absolute-only scheme and no longer governs.
-    joint_pos_action.alpha = 1.0
-    # (GETUP_ACTION_ALPHA is read/flagged by _log_env_var_overrides() above — dead
-    # under Hybrid, see the registry entry.)
+    joint_pos_action.alpha = 0.10
+    _override_alpha = os.environ.get("GETUP_ACTION_ALPHA")
+    if _override_alpha not in (None, ""):
+        joint_pos_action.alpha = float(_override_alpha)
+    # (GETUP_ACTION_ALPHA's actual value is reported by _log_env_var_overrides()
+    # above; the registry's active=False entry for it is stale now that the
+    # absolute/EMA scheme is active again — see the REVERTED note above.)
     # Slew-rate limit (rad/s) on the commanded target — bounds ABSOLUTE motion speed,
     # which alpha (a fraction-of-distance EMA) structurally cannot: the biggest joint
     # travel early in the rise stays fast even at low alpha, and anti_jump_velocity
@@ -673,29 +673,31 @@ def unitree_g1_getup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # slew cap is what bounds the big early-travel joints that alpha (fraction-
     # of-distance EMA) structurally cannot slow. Revert to 2.5 first if the
     # robot can no longer catch itself during the rise.
-    # HYBRID: 2.0 -> 3.0 rad/s. The slew is now a SAFETY NET / hold-transition backstop,
-    # not the primary smoother — the nominal rise-phase speed bound is beta*s_j, which
-    # at beta=1.0 peaks at 0.05 rad/step = 2.5 rad/s (shoulders/elbows; legs 2.0 rad/s).
-    # Leaving the cap at 2.0 would have made the slew bind during a NOMINAL rise and
-    # silently throttle the incremental branch it is supposed to leave alone. 3.0 sits
-    # just above that peak, so it only engages on a genuine anomaly or a mode switch.
-    joint_pos_action.max_rate = 3.0
+    joint_pos_action.max_rate = 2.0
     _override_max_rate = os.environ.get("GETUP_ACTION_MAX_RATE")
     if _override_max_rate not in (None, ""):
         joint_pos_action.max_rate = float(_override_max_rate)
     # (GETUP_ACTION_MAX_RATE's actual value is reported by _log_env_var_overrides().)
     # Liftoff phase (v18b): slower alpha/slew for the first _LIFTOFF_STEPS after the
     # settle window, blending back to nominal over _LIFTOFF_RAMP_STEPS. See the
-    # _LIFTOFF_* constants above for rationale/values.
-    # HYBRID: the liftoff phase is DISABLED. It existed to slow the early rise of the
-    # absolute scheme, whose EMA moved a fraction-of-distance and was therefore fastest
-    # exactly when the target was farthest (right at liftoff). The incremental branch
-    # has no such distance dependence — its step is beta*s_j regardless of how far HOME
-    # is — so the problem it solved no longer exists, and its alpha/slew overrides would
-    # now only throttle the increment. action_ramp_steps fades the increment in instead.
-    joint_pos_action.liftoff_steps = 0
-    # (GETUP_ACTION_LIFTOFF_STEPS/ALPHA/MAX_RATE are read/flagged by
-    # _log_env_var_overrides() above — dead under Hybrid, see the registry.)
+    # _LIFTOFF_* constants above for rationale/values. Re-enabled with the absolute/
+    # EMA scheme (see the REVERTED note above) — this is what v33_fresh trained under.
+    joint_pos_action.liftoff_steps = _LIFTOFF_STEPS
+    joint_pos_action.liftoff_alpha = _LIFTOFF_ALPHA
+    joint_pos_action.liftoff_max_rate = _LIFTOFF_MAX_RATE
+    joint_pos_action.liftoff_ramp_steps = _LIFTOFF_RAMP_STEPS
+    _override_liftoff_steps = os.environ.get("GETUP_ACTION_LIFTOFF_STEPS")
+    if _override_liftoff_steps not in (None, ""):
+        joint_pos_action.liftoff_steps = int(_override_liftoff_steps)
+    _override_liftoff_alpha = os.environ.get("GETUP_ACTION_LIFTOFF_ALPHA")
+    if _override_liftoff_alpha not in (None, ""):
+        joint_pos_action.liftoff_alpha = float(_override_liftoff_alpha)
+    _override_liftoff_max_rate = os.environ.get("GETUP_ACTION_LIFTOFF_MAX_RATE")
+    if _override_liftoff_max_rate not in (None, ""):
+        joint_pos_action.liftoff_max_rate = float(_override_liftoff_max_rate)
+    # (GETUP_ACTION_LIFTOFF_STEPS/ALPHA/MAX_RATE actual values are reported by
+    # _log_env_var_overrides() above; the registry's active=False entries for
+    # them are stale now that the absolute/EMA scheme is active again.)
     # v10 beta-anchor fix: anchor the residual/beta scheme on the standing HOME
     # pose, NOT the entity's spawn default (= SUPINE, lying on the back). The
     # entity must keep spawning supine, but mjlab derives default_joint_pos from
